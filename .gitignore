@@ -1,0 +1,17 @@
+# Сборочные артефакты
+dist/
+cmd/installer/payload/payload.zip
+cmd/installer/payload/uninstaller.exe
+
+# Сторонние двоичные файлы: скачиваются отдельно, см. README
+bundle/
+
+# Ничего из перечисленного ниже в публичный репозиторий попадать не должно
+*.env
+.env
+env*.txt
+*secret*
+*token*
+state.json
+proxy-backup.json
+device.id
