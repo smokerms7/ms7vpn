@@ -1,7 +1,7 @@
 # Сборочные артефакты
 dist/
 cmd/installer/payload/payload.zip
-cmd/installer/payload/uninstaller.exe
+cmd/installer/payload/*.sha256
 
 # Сторонние двоичные файлы: скачиваются отдельно, см. README
 bundle/

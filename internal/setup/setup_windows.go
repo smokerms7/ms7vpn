@@ -23,17 +23,97 @@ import (
 
 const (
 	AppName     = "MS7VPN"
-	AppVersion  = "ms7.vs1.2"
+	AppVersion  = "ms7.vs2.0"
 	Publisher   = "MS7 VPN"
 	RegistryKey = `Software\Microsoft\Windows\CurrentVersion\Uninstall\MS7VPN`
 )
 
-func InstallDir() (string, error) {
+// DefaultInstallDir — папка, которую мастер предлагает по умолчанию.
+// %LOCALAPPDATA% выбран потому, что запись туда не требует прав администратора.
+func DefaultInstallDir() (string, error) {
 	base, err := os.UserCacheDir() // %LOCALAPPDATA%
 	if err != nil {
 		return "", err
 	}
 	return filepath.Join(base, "Programs", AppName), nil
+}
+
+// InstallDir возвращает папку, куда программа установлена на самом деле.
+//
+// Папку теперь выбирает человек в мастере установки, поэтому вычислять её
+// заново нельзя: обновление поставило бы новую версию в %LOCALAPPDATA%, а
+// старая осталась бы там, куда её поставили, — на диске оказались бы две
+// копии, и ярлыки вели бы на старую. Настоящий путь пишется в реестр при
+// установке, отсюда и читаем.
+func InstallDir() (string, error) {
+	if recorded := RecordedInstallDir(); recorded != "" {
+		return recorded, nil
+	}
+	return DefaultInstallDir()
+}
+
+// RecordedInstallDir читает путь установки из реестра.
+// Пустая строка означает, что записи нет или папка исчезла.
+func RecordedInstallDir() string {
+	key, err := registry.OpenKey(registry.CURRENT_USER, RegistryKey, registry.QUERY_VALUE)
+	if err != nil {
+		return ""
+	}
+	defer key.Close()
+	value, _, err := key.GetStringValue("InstallLocation")
+	if err != nil {
+		return ""
+	}
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if info, err := os.Stat(value); err != nil || !info.IsDir() {
+		return ""
+	}
+	return value
+}
+
+// DataDir — папка с настройками, подписками и журналом. Обновление её не
+// трогает: иначе человек после обновления остался бы без своих подписок.
+func DataDir() (string, error) {
+	base, err := os.UserConfigDir() // %APPDATA%
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(base, AppName), nil
+}
+
+// Writable проверяет, можно ли писать в папку.
+//
+// Нужна мастеру: если человек выберет Program Files, запись без прав
+// администратора не пройдёт, и узнать об этом лучше до начала установки,
+// а не на середине распаковки.
+func Writable(dir string) bool {
+	target := dir
+	// Поднимаемся до первой существующей папки: сама папка установки
+	// обычно ещё не создана.
+	for {
+		if info, err := os.Stat(target); err == nil {
+			if !info.IsDir() {
+				return false
+			}
+			break
+		}
+		parent := filepath.Dir(target)
+		if parent == target {
+			return false
+		}
+		target = parent
+	}
+	probe, err := os.CreateTemp(target, ".ms7vpn-*")
+	if err != nil {
+		return false
+	}
+	name := probe.Name()
+	probe.Close()
+	_ = os.Remove(name)
+	return true
 }
 
 func HiddenCommand(name string, args ...string) *exec.Cmd {
@@ -47,6 +127,111 @@ func HiddenCommand(name string, args ...string) *exec.Cmd {
 func KillRunning() {
 	_ = HiddenCommand("taskkill", "/IM", AppName+".exe", "/F").Run()
 	_ = HiddenCommand("taskkill", "/IM", "xray.exe", "/F").Run()
+}
+
+// PreviousInstallDirs находит прежние установки, которые лежат не там, куда
+// ставим сейчас.
+//
+// Раньше такие копии оставались на диске навсегда. Установщик чистил только
+// ту папку, в которую ставил, а про папку прошлой установки не знал ничего:
+// человек один раз поставил программу в другое место, обновился — и получил
+// две копии, вторую из которых ничто уже не обновляло.
+//
+// Проверяем два места: записанное в реестре и предлагаемое по умолчанию.
+// Совпадающие с текущей целью и чужие папки отсеиваются.
+func PreviousInstallDirs(current string) []string {
+	currentKey := dirKey(current)
+	seen := map[string]bool{}
+	var found []string
+
+	for _, candidate := range []string{RecordedInstallDir(), defaultInstallDirOrEmpty()} {
+		key := dirKey(candidate)
+		if key == "" || key == currentKey || seen[key] {
+			continue
+		}
+		seen[key] = true
+		if !looksLikeOurInstall(candidate) {
+			continue
+		}
+		found = append(found, candidate)
+	}
+	return found
+}
+
+func defaultInstallDirOrEmpty() string {
+	dir, err := DefaultInstallDir()
+	if err != nil {
+		return ""
+	}
+	return dir
+}
+
+func dirKey(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	if absolute, err := filepath.Abs(path); err == nil {
+		path = absolute
+	}
+	return strings.ToLower(strings.TrimRight(path, `\/`))
+}
+
+// looksLikeOurInstall страхует от удаления чужой папки: сносим её только
+// если внутри лежит наш исполняемый файл. Путь в реестре мог остаться от
+// давно удалённой программы или быть испорчен вручную.
+func looksLikeOurInstall(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	info, err := os.Stat(filepath.Join(dir, AppName+".exe"))
+	return err == nil && !info.IsDir() && info.Size() > 0
+}
+
+// RemoveInstallation сносит прежнюю установку целиком.
+//
+// Данные программы лежат в %APPDATA%\MS7VPN и не затрагиваются: подписки и
+// настройки переживают переезд в другую папку.
+func RemoveInstallation(dir string) error {
+	if !looksLikeOurInstall(dir) {
+		return nil
+	}
+	KillRunning()
+	if err := os.RemoveAll(dir); err != nil {
+		return fmt.Errorf("не удалось удалить прежнюю версию из %s: %w", dir, err)
+	}
+	// Пустая папка Programs\MS7VPN родителя за собой не тянем: там могут
+	// лежать другие программы.
+	return nil
+}
+
+// PurgeProgramFiles очищает папку программы перед установкой новой версии.
+//
+// Простая распаковка поверх оставляла файлы, которых в новой сборке уже нет:
+// так в папке и накопились лишний деинсталлятор и запасная копия Xray.
+// Данные в %APPDATA%\MS7VPN не затрагиваются — там подписки и настройки.
+// Файлы из keep не удаляются: это сам работающий установщик.
+func PurgeProgramFiles(target string, keep ...string) {
+	entries, err := os.ReadDir(target)
+	if err != nil {
+		return
+	}
+	protected := make(map[string]bool, len(keep))
+	for _, path := range keep {
+		if path == "" {
+			continue
+		}
+		if absolute, err := filepath.Abs(path); err == nil {
+			protected[strings.ToLower(absolute)] = true
+		}
+	}
+	for _, entry := range entries {
+		path := filepath.Join(target, entry.Name())
+		if absolute, err := filepath.Abs(path); err == nil && protected[strings.ToLower(absolute)] {
+			continue
+		}
+		_ = os.RemoveAll(path)
+	}
 }
 
 func StartMenuDir() string {

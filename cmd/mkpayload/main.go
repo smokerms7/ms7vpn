@@ -1,11 +1,19 @@
-// Утилита сборки: складывает payload.zip для установщика.
+// Утилита сборки: складывает payload.zip для установщика и считает
+// контрольные суммы выпускаемых файлов.
 //
 // Раньше архив собирался вручную, и именно поэтому в него однажды не попали
 // geo-файлы, а установщик WebView2 попал, но не запускался.
+//
+// Использование:
+//
+//	mkpayload -o payload.zip ФАЙЛ [ФАЙЛ...]   собрать архив (и payload.zip.sha256)
+//	mkpayload -sum ФАЙЛ [ФАЙЛ...]             написать ФАЙЛ.sha256 рядом с каждым
 package main
 
 import (
 	"archive/zip"
+	"crypto/sha256"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"io"
@@ -15,19 +23,60 @@ import (
 )
 
 func main() {
-	output := flag.String("o", "cmd/installer/payload.zip", "куда положить архив")
+	output := flag.String("o", "cmd/installer/payload/payload.zip", "куда положить архив")
+	sumOnly := flag.Bool("sum", false, "только посчитать контрольные суммы перечисленных файлов")
 	flag.Parse()
 
 	sources := flag.Args()
 	if len(sources) == 0 {
 		fmt.Fprintln(os.Stderr, "использование: mkpayload -o payload.zip ФАЙЛ [ФАЙЛ...]")
+		fmt.Fprintln(os.Stderr, "               mkpayload -sum ФАЙЛ [ФАЙЛ...]")
 		os.Exit(2)
+	}
+
+	if *sumOnly {
+		for _, source := range sources {
+			if err := writeSum(source); err != nil {
+				fmt.Fprintln(os.Stderr, "ошибка:", err)
+				os.Exit(1)
+			}
+		}
+		return
 	}
 
 	if err := build(*output, sources); err != nil {
 		fmt.Fprintln(os.Stderr, "ошибка:", err)
 		os.Exit(1)
 	}
+	if err := writeSum(*output); err != nil {
+		fmt.Fprintln(os.Stderr, "ошибка:", err)
+		os.Exit(1)
+	}
+}
+
+// writeSum кладёт рядом с файлом его контрольную сумму.
+//
+// Формат тот же, что у sha256sum: «хеш *имя». Установщик и приложение
+// разбирают его сами (см. update.ParseSHA256File), а человек может сверить
+// файл командой certutil -hashfile.
+func writeSum(path string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	digest := sha256.New()
+	if _, err := io.Copy(digest, file); err != nil {
+		return err
+	}
+	sum := hex.EncodeToString(digest.Sum(nil))
+	line := fmt.Sprintf("%s *%s\n", sum, filepath.Base(path))
+	if err := os.WriteFile(path+".sha256", []byte(line), 0o644); err != nil {
+		return err
+	}
+	fmt.Printf("  # %-34s %s\n", filepath.Base(path)+".sha256", sum[:16]+"…")
+	return nil
 }
 
 func build(output string, sources []string) error {

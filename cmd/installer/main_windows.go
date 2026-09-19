@@ -1,53 +1,59 @@
 //go:build windows
 
-// Установщик MS7VPN: один exe, внутри которого лежат сама программа,
-// Xray-core, Wintun и деинсталлятор. Ставит всё в папку пользователя,
-// создаёт ярлыки и запись в «Установка и удаление программ».
-// Права администратора не нужны.
+// Установщик MS7VPN.
+//
+// Собирается в двух видах из одного кода:
+//   - обычный (онлайн) — весит пару мегабайт, файлы программы скачивает
+//     с GitHub во время установки;
+//   - полный (сборка с тегом offline) — несёт всё внутри и ставит без
+//     интернета.
+//
+// Режимы запуска:
+//
+//	без аргументов  окно мастера
+//	/update         то же окно, но сразу начинает и потом запускает программу
+//	/silent         установка без окна
+//	/uninstall      удаление
 package main
 
 import (
 	"archive/zip"
 	"bytes"
-	"embed"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 
+	"ms7vpn/internal/installui"
 	"ms7vpn/internal/setup"
 
 	"golang.org/x/sys/windows/registry"
 )
 
-// Встраиваемые файлы лежат в отдельной папке и собираются скриптом сборки.
-// Папка хранится в репозитории с одним пустым файлом: так «go build» проходит
-// сразу после клонирования, а сами артефакты (они весят десятки мегабайт)
-// в репозиторий не попадают.
-//
-//go:embed all:payload
-var payloadFS embed.FS
-
-func embedded(name string) []byte {
-	data, err := payloadFS.ReadFile("payload/" + name)
-	if err != nil {
-		return nil
-	}
-	return data
-}
-
 const (
-	// webview2Bootstrapper — имя файла внутри payload.zip. Если он там есть
-	// и WebView2 в системе не установлен, запускаем его перед стартом.
-	webview2Bootstrapper = "MicrosoftEdgeWebview2Setup.exe"
+	// uninstallerName — как деинсталлятор лежит в архиве.
+
+	// после установки. Второе имя привычно по другим программам.
+	uninstallerName = "uninstaller.exe"
+	uninstallerFile = "unins000.exe"
 )
 
 // staleFiles — то, что оставляли прежние версии установщика. Без этой уборки
 // в папке копились лишние десятки мегабайт: второй деинсталлятор и запасная
 // копия Xray, которую приложение когда-то скачивало само.
+// webview2Installers — чем ставить WebView2, в порядке предпочтения.
+//
+// Автономный установщик (около 130 МБ) лежит только в полной сборке и
+// работает без интернета. Маленький загрузчик тянет рантайм из сети сам.
+// Если в архиве нет ни того, ни другого, программа откатится на запасной
+// интерфейс — окно всё равно откроется.
+var webview2Installers = []string{
+	"MicrosoftEdgeWebView2RuntimeInstallerX64.exe",
+	"MicrosoftEdgeWebview2Setup.exe",
+}
+
 var staleFiles = []string{
 	"Uninstall-MS7VPN.exe",
 	"xray_no_window.vbs",
@@ -55,67 +61,209 @@ var staleFiles = []string{
 }
 
 func main() {
-	if len(os.Args) > 1 && strings.EqualFold(os.Args[1], "/uninstall") {
+	switch strings.ToLower(argument()) {
+	case "/uninstall":
 		if err := setup.Uninstall(); err != nil {
 			setup.Message("Удаление MS7VPN", "Не удалось удалить программу:\n"+err.Error(), true)
 			os.Exit(1)
 		}
 		setup.Message("MS7VPN", "Программа удалена.", false)
-		return
-	}
-	if err := install(); err != nil {
-		setup.Message("Установка MS7VPN", "Не удалось установить программу:\n"+err.Error(), true)
-		os.Exit(1)
+
+	case "/silent":
+		target := installTarget()
+		if _, err := install(target, func(int, string) {}); err != nil {
+			setup.Message("Установка MS7VPN", "Не удалось установить программу:\n"+err.Error(), true)
+			os.Exit(1)
+		}
+		launch(target)
+
+	case "/update":
+		runWizard(true)
+
+	default:
+		runWizard(false)
 	}
 }
 
-func install() error {
-	target, err := setup.InstallDir()
+func argument() string {
+	if len(os.Args) > 1 {
+		return strings.TrimSpace(os.Args[1])
+	}
+	return ""
+}
+
+// installTarget — куда ставить. Если программа уже установлена, берём её
+// нынешнюю папку: иначе на диске оказались бы две копии, а ярлыки вели бы
+// на старую.
+func installTarget() string {
+	if existing := setup.RecordedInstallDir(); existing != "" {
+		return existing
+	}
+	target, err := setup.DefaultInstallDir()
 	if err != nil {
-		return err
+		return filepath.Join(os.Getenv("LOCALAPPDATA"), "Programs", setup.AppName)
+	}
+	return target
+}
+
+func runWizard(autoStart bool) {
+	existing := setup.RecordedInstallDir()
+	upgrade := existing != ""
+	target := installTarget()
+
+	caption := "Установка MS7 VPN"
+	if upgrade {
+		caption = "Обновление MS7 VPN"
+	}
+
+	request := installui.Request{
+		Caption: caption,
+		Product: "MS7 VPN",
+		Version: strings.TrimPrefix(setup.AppVersion, "ms7.vs"),
+		// Папку выбирают только при первой установке. При обновлении менять
+		// её нельзя: старая версия осталась бы на месте вместе с ярлыками.
+		AllowChooseDir: !upgrade,
+		DefaultDir:     target,
+		Hint:           installHint(upgrade),
+		AutoStart:      autoStart,
+		Upgrade:        upgrade,
+		ValidateDir:    validateDir,
+		Bullets: []string{
+			"Быстрое подключение",
+			"Обход блокировок",
+			"Без ограничений",
+		},
+	}
+
+	outcome := installui.Run(request, install)
+	if outcome.Err != nil {
+		setup.Message("Установка MS7VPN", outcome.Err.Error(), true)
+		os.Exit(1)
+	}
+	if !outcome.Installed {
+		return
+	}
+	// После обновления программу возвращаем сама: человек её не закрывал,
+	// это мы её закрыли, чтобы заменить файлы.
+	if outcome.Launch || autoStart {
+		launch(outcome.Dir)
+	}
+}
+
+// validateDir объясняет человеку, почему выбранная папка не подходит,
+// пока установка ещё не началась.
+func validateDir(dir string) string {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return "Укажите папку для установки."
+	}
+	if !filepath.IsAbs(dir) {
+		return "Укажите полный путь, например C:\\Programs\\MS7VPN."
+	}
+	if info, err := os.Stat(dir); err == nil && !info.IsDir() {
+		return "По этому пути уже есть файл с таким именем. Выберите другую папку."
+	}
+	if !setup.Writable(dir) {
+		return "В эту папку нельзя записывать без прав администратора.\n\n" +
+			"Выберите другую — например, папку внутри «Локальные данные» " +
+			"вашего пользователя. MS7 VPN не требует прав администратора " +
+			"для установки."
+	}
+	return ""
+}
+
+// launch запускает установленную программу.
+//
+// Никакого HideWindow здесь быть не должно. Этот флаг не «прячет консоль»,
+// он кладёт SW_HIDE в STARTUPINFO, а Windows передаёт это значение дочернему
+// процессу как состояние его ПЕРВОГО окна. WebView2 в таком окне считает,
+// что показывать нечего, и не рисует: окно есть, содержимое белое. Отсюда
+// и бралось белое окно ровно при первом запуске — том, который делает
+// установщик. Запуск с ярлыка работал, потому что там STARTUPINFO обычный.
+//
+// Прятать всё равно нечего: MS7VPN.exe собран с -H windowsgui и консоли
+// не имеет.
+func launch(target string) {
+	appPath := filepath.Join(target, setup.AppName+".exe")
+	command := exec.Command(appPath)
+	command.Dir = target
+	_ = command.Start()
+}
+
+// install выполняет установку целиком. report получает ход работы в процентах.
+func install(target string, report installui.Reporter) (string, error) {
+	// Папки прежних версий, которые удалить не вышло: файл мог быть занят.
+	var leftovers []string
+
+	report(2, "Подготовка")
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		return "", fmt.Errorf("создание папки: %w", err)
 	}
 	setup.KillRunning()
 
-	if err := os.MkdirAll(target, 0o755); err != nil {
-		return fmt.Errorf("создание папки: %w", err)
+	// Скачиваем (или достаём из себя) до того, как тронем установленную
+	// версию: если интернета нет, у человека останется рабочая программа.
+	payload, err := obtainPayload(report)
+	if err != nil {
+		return "", err
 	}
-	if err := unpack(target); err != nil {
-		return err
+
+	// Прежняя установка в другой папке: сносим её, иначе на диске останутся
+	// две копии, и ярлыки будут вести на ту, которую больше никто не обновит.
+	for _, previous := range setup.PreviousInstallDirs(target) {
+		report(71, "Удаление прежней версии")
+		if err := setup.RemoveInstallation(previous); err != nil {
+			// Не останавливаем установку: новая версия важнее уборки.
+			// Человек увидит предупреждение в конце.
+			leftovers = append(leftovers, previous)
+		}
+	}
+
+	report(72, "Замена файлов")
+	self, _ := os.Executable()
+	setup.PurgeProgramFiles(target, self)
+
+	report(76, "Распаковка")
+	if err := unpack(payload, target, report); err != nil {
+		return "", err
 	}
 	cleanStaleFiles(target)
 	cleanDownloadedCore()
 
 	appPath := filepath.Join(target, setup.AppName+".exe")
-	uninstaller := filepath.Join(target, "unins000.exe")
-	if err := writeUninstaller(uninstaller); err != nil {
-		return err
+	if _, err := os.Stat(appPath); err != nil {
+		return "", fmt.Errorf("в архиве нет %s.exe — сборка установщика испорчена", setup.AppName)
 	}
 
+	report(90, "Ярлыки")
+	uninstaller := filepath.Join(target, uninstallerFile)
+	if err := ensureUninstaller(uninstaller); err != nil {
+		return "", err
+	}
 	createShortcut(filepath.Join(setup.StartMenuDir(), setup.AppName+".lnk"), appPath, target)
 	createShortcut(filepath.Join(setup.DesktopDir(), setup.AppName+".lnk"), appPath, target)
 	registerUninstall(target, appPath, uninstaller)
 
 	// WebView2 — движок, которым рисуется окно программы. Без него приложение
-	// молча откатывалось на старый интерфейс. Раньше установщик нёс этот файл
-	// внутри, но никогда его не запускал.
+	// молча откатывается на запасной интерфейс.
+	report(94, "Проверка WebView2")
 	ensureWebView2(target)
 
-	command := exec.Command(appPath)
-	command.Dir = target
-	command.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	_ = command.Start()
-	return nil
+	report(100, "Готово")
+	if len(leftovers) > 0 {
+		return "Прежнюю версию удалить не удалось, осталась папка:\n" +
+			strings.Join(leftovers, "\n") +
+			"\nУдалите её вручную — программа работает и без этого.", nil
+	}
+	return "", nil
 }
 
-// writeUninstaller кладёт рядом отдельный маленький деинсталлятор.
-func writeUninstaller(path string) error {
-	if binary := embedded("uninstaller.exe"); len(binary) > 0 {
-		if err := os.WriteFile(path, binary, 0o755); err != nil {
-			return fmt.Errorf("запись деинсталлятора: %w", err)
-		}
+// ensureUninstaller проверяет, что деинсталлятор на месте. Он приходит внутри
+// архива; если сборка сделана без него, кладём копию самого установщика.
+func ensureUninstaller(path string) error {
+	if info, err := os.Stat(path); err == nil && info.Size() > 0 {
 		return nil
 	}
-	// Запасной путь: отдельного деинсталлятора в сборке нет — используем себя.
 	self, err := os.Executable()
 	if err != nil {
 		return err
@@ -124,7 +272,10 @@ func writeUninstaller(path string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o755)
+	if err := os.WriteFile(path, data, 0o755); err != nil {
+		return fmt.Errorf("запись деинсталлятора: %w", err)
+	}
+	return nil
 }
 
 func cleanStaleFiles(target string) {
@@ -144,10 +295,9 @@ func cleanDownloadedCore() {
 	_ = os.RemoveAll(filepath.Join(base, setup.AppName, "core"))
 }
 
-func unpack(target string) error {
-	payload := embedded("payload.zip")
+func unpack(payload []byte, target string, report installui.Reporter) error {
 	if len(payload) == 0 {
-		return fmt.Errorf("установщик собран без payload.zip — запустите BUILD_WINDOWS.bat")
+		return fmt.Errorf("установщик собран без файлов программы — запустите BUILD_WINDOWS.bat")
 	}
 	reader, err := zip.NewReader(bytes.NewReader(payload), int64(len(payload)))
 	if err != nil {
@@ -157,10 +307,26 @@ func unpack(target string) error {
 	if err != nil {
 		return err
 	}
+
+	// Общий объём нужен, чтобы полоса двигалась ровно: xray.exe занимает
+	// почти весь архив, и без учёта размеров она стояла бы на месте, а потом
+	// прыгала до конца.
+	var total, written int64
+	for _, file := range reader.File {
+		total += file.FileInfo().Size()
+	}
+	if total == 0 {
+		total = 1
+	}
+
 	for _, file := range reader.File {
 		name := filepath.Clean(file.Name)
 		if name == "." || strings.HasPrefix(name, "..") || filepath.IsAbs(name) {
 			continue
+		}
+		// Деинсталлятор кладём под привычным именем.
+		if strings.EqualFold(name, uninstallerName) {
+			name = uninstallerFile
 		}
 		path := filepath.Join(root, name)
 		absolute, err := filepath.Abs(path)
@@ -179,6 +345,8 @@ func unpack(target string) error {
 		if err := extractFile(file, path); err != nil {
 			return err
 		}
+		written += file.FileInfo().Size()
+		report(76+int(14*written/total), "Распаковка")
 	}
 	return nil
 }
@@ -239,17 +407,20 @@ func webView2Installed() bool {
 }
 
 func ensureWebView2(target string) {
-	bootstrapper := filepath.Join(target, webview2Bootstrapper)
-	if webView2Installed() {
-		_ = os.Remove(bootstrapper)
-		return
+	installed := webView2Installed()
+	for _, name := range webview2Installers {
+		path := filepath.Join(target, name)
+		if _, err := os.Stat(path); err != nil {
+			continue
+		}
+		if !installed {
+			_ = setup.HiddenCommand(path, "/silent", "/install").Run()
+			installed = webView2Installed()
+		}
+		// Установщик рантайма весит десятки мегабайт и после установки
+		// не нужен — на диске его не оставляем.
+		_ = os.Remove(path)
 	}
-	if _, err := os.Stat(bootstrapper); err != nil {
-		return
-	}
-	_ = setup.HiddenCommand(bootstrapper, "/silent", "/install").Run()
-	// Установщик рантайма больше не нужен — не оставляем его на диске.
-	_ = os.Remove(bootstrapper)
 }
 
 // createShortcut делает ярлык через WScript.Shell в PowerShell:

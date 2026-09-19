@@ -13,6 +13,8 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
+
 	"encoding/json"
 	"net"
 	"net/http"
@@ -107,11 +109,11 @@ func applyWindowIcon(handle uintptr, dataDir string) {
 		return
 	}
 	const (
-		imageIcon      = 1
-		loadFromFile   = 0x00000010
-		wmSetIcon      = 0x0080
-		iconBig        = 1
-		iconSmall      = 0
+		imageIcon    = 1
+		loadFromFile = 0x00000010
+		wmSetIcon    = 0x0080
+		iconBig      = 1
+		iconSmall    = 0
 	)
 	big, _, _ := loadImage.Call(0, uintptr(unsafe.Pointer(namePtr)), imageIcon, 64, 64, loadFromFile)
 	small, _, _ := loadImage.Call(0, uintptr(unsafe.Pointer(namePtr)), imageIcon, 16, 16, loadFromFile)
@@ -130,6 +132,21 @@ const (
 	minWidth     = 900
 	minHeight    = 640
 )
+
+// waitForServer дожидается, пока локальный сервер начнёт принимать
+// соединения. Не больше двух секунд: если не поднялся, навигация всё равно
+// будет повторена.
+func waitForServer(address string) {
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", address, 200*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
 
 func newToken() (string, error) {
 	buf := make([]byte, 24)
@@ -170,10 +187,34 @@ func Run(app *ms7app.App, autoConnect string) error {
 		w.Header().Set("Cache-Control", "no-store")
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "data": collectDeviceInfo(app.DataDir())})
 	})
+	// Журнал запросов первых секунд. Нужен, чтобы отличить «страница не
+	// загрузилась» от «загрузилась и не нарисовалась»: в первом случае в
+	// журнале не будет ни styles.css, ни app.js.
+	var requestLog atomic.Int32
+	logRequest := func(path string) {
+		if requestLog.Add(1) <= 40 {
+			log.Printf("%s  запрос %s", time.Now().Format("2006-01-02 15:04:05"), path)
+		}
+	}
+
 	var pageLoads atomic.Int32
+	// uiReady взводит сама страница, когда отрисовалась. Считать загрузку
+	// HTML признаком успеха мало: страница может прийти, а окно остаться
+	// белым, если WebView2 её не показал.
+	var uiReady atomic.Bool
+	mux.HandleFunc("/api/ui-ready", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-MS7-Token") != token && r.URL.Query().Get("token") != token {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		uiReady.Store(true)
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	})
 	fileServer := http.FileServer(http.FS(static))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		// Окно открывается только с локального адреса и только этим процессом.
+		logRequest(r.URL.Path)
 		w.Header().Set("Cache-Control", "no-store")
 		if r.URL.Path == "/" || r.URL.Path == "/index.html" {
 			page, readErr := fs.ReadFile(static, "index.html")
@@ -205,9 +246,35 @@ func Run(app *ms7app.App, autoConnect string) error {
 		_ = server.Shutdown(ctx)
 	}()
 
+	// Белое окно при живом движке почти всегда упирается в отрисовку через
+	// видеокарту: WebView2 честно грузит страницу, но не выводит её. Лечится
+	// ключом --disable-gpu. Включать его всем подряд не годится — на
+	// исправных машинах это лишняя нагрузка на процессор. Поэтому ставим
+	// метку после неудачи и со следующего запуска работаем без ускорения.
+	nogpu := filepath.Join(app.DataDir(), "webview2-nogpu")
+	if _, err := os.Stat(nogpu); err == nil {
+		const argsVar = "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"
+		existing := os.Getenv(argsVar)
+		if !strings.Contains(existing, "--disable-gpu") {
+			_ = os.Setenv(argsVar, strings.TrimSpace(existing+" --disable-gpu"))
+		}
+		log.Printf("%s  окно рисуется без видеоускорения (остался след прошлой неудачи)",
+			time.Now().Format("2006-01-02 15:04:05"))
+	}
+
+	// Профиль WebView2 держим рядом с остальными данными программы.
+	// По умолчанию библиотека создаёт папку с именем самого exe прямо в
+	// Roaming — «MS7VPN.exe». Своя папка понятнее, переживает переустановку
+	// и не путается с профилем портативной копии.
+	profileDir := filepath.Join(app.DataDir(), "webview2")
+	if err := os.MkdirAll(profileDir, 0o755); err != nil {
+		profileDir = ""
+	}
+
 	view := webview2.NewWithOptions(webview2.WebViewOptions{
 		Debug:     false,
 		AutoFocus: true,
+		DataPath:  profileDir,
 		WindowOptions: webview2.WindowOptions{
 			Title:  windowTitle,
 			Width:  windowWidth,
@@ -229,6 +296,11 @@ func Run(app *ms7app.App, autoConnect string) error {
 	stopTray := startTray(app, uintptr(view.Window()))
 	defer stopTray()
 
+	// Ждём, пока сервер начнёт принимать соединения. Слушающий сокет уже
+	// создан, но между Listen и Serve есть зазор, и первая навигация могла
+	// прийти в него.
+	waitForServer(listener.Addr().String())
+
 	url := fmt.Sprintf("http://%s/?token=%s", listener.Addr().String(), token)
 	if autoConnect != "" {
 		url += "&autoconnect=" + autoConnect
@@ -236,14 +308,55 @@ func Run(app *ms7app.App, autoConnect string) error {
 	view.Navigate(url)
 
 	// WebView2 иногда не подхватывает первую навигацию — окно остаётся белым.
-	// Если страница так и не была запрошена, повторяем переход.
+	// Чаще всего это первый запуск: рантайм только что поставлен и заводит
+	// свой профиль. Повторяем переход, пока страница не сообщит, что
+	// отрисовалась.
+	//
+	// Прежняя проверка смотрела только на то, запрашивался ли HTML. Этого
+	// мало: страница приходила, счётчик рос, повторы прекращались, а окно
+	// оставалось белым. Теперь ждём маячок от самой страницы.
+	// Первой попытке даём отработать спокойно и только потом вмешиваемся.
+	//
+	// Прежний вариант повторял переход каждые 0.7 секунды. Этого мало:
+	// страница успевала загрузиться, но не успевала показаться, и очередной
+	// переход сносил её на полпути. Окно оставалось белым не из-за WebView2,
+	// а из-за самих повторов. Теперь первая пауза длинная, а повторов мало.
+	const (
+		firstWait = 5 * time.Second
+		retryWait = 3 * time.Second
+		attempts  = 3
+	)
+	failed := make(chan struct{})
 	go func() {
-		for attempt := 0; attempt < 3; attempt++ {
-			time.Sleep(1500 * time.Millisecond)
-			if pageLoads.Load() > 0 {
+		time.Sleep(firstWait)
+		for attempt := 0; attempt < attempts; attempt++ {
+			if uiReady.Load() {
 				return
 			}
 			view.Dispatch(func() { view.Navigate(url) })
+			time.Sleep(retryWait)
+		}
+		if uiReady.Load() {
+			return
+		}
+		log.Printf("%s  интерфейс не отрисовался за %d попыток (страница запрошена %d раз)",
+			time.Now().Format("2006-01-02 15:04:05"), attempts, pageLoads.Load())
+		// Оставляем след, чтобы следующий запуск обошёлся без видеоускорения,
+		// и закрываем пустое окно: лучше запасной интерфейс, чем белый лист.
+		_ = os.WriteFile(nogpu, []byte("1"), 0o600)
+		close(failed)
+		view.Dispatch(func() { view.Terminate() })
+	}()
+
+	// Отрисовалось — след прошлой неудачи больше не нужен, иначе программа
+	// навсегда осталась бы без видеоускорения.
+	go func() {
+		for attempt := 0; attempt < 20; attempt++ {
+			time.Sleep(500 * time.Millisecond)
+			if uiReady.Load() {
+				_ = os.Remove(nogpu)
+				return
+			}
 		}
 	}()
 
@@ -253,5 +366,13 @@ func Run(app *ms7app.App, autoConnect string) error {
 	}()
 
 	view.Run()
+
+	// Если окно закрыли мы сами из-за неудачной отрисовки, сообщаем об этом
+	// наверх: вызывающий код откроет запасное окно.
+	select {
+	case <-failed:
+		return errors.New("WebView2 загрузил страницу, но не показал её")
+	default:
+	}
 	return nil
 }

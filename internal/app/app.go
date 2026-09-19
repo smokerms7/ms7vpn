@@ -198,6 +198,8 @@ func (a *App) RegisterRoutes(mux *http.ServeMux, token string) {
 	mux.HandleFunc("/api/open-data-folder", withAuth(a.handleOpenDataFolder))
 	mux.HandleFunc("/api/elevate", withAuth(a.handleElevate))
 	mux.HandleFunc("/api/update/check", withAuth(a.handleCheckUpdate))
+	mux.HandleFunc("/api/update/install", withAuth(a.handleInstallUpdate))
+	mux.HandleFunc("/api/update/progress", withAuth(a.handleUpdateProgress))
 	mux.HandleFunc("/api/quit", withAuth(a.handleQuit))
 }
 

@@ -14,6 +14,10 @@ func EnableSystemProxy(_ string, _, _ int) error { return nil }
 func RestoreSystemProxy(_ string) error          { return nil }
 func RecoverSystemProxy(_ string) error          { return nil }
 
+func RunInstaller(_ string) error {
+	return fmt.Errorf("обновление через установщик работает только в Windows")
+}
+
 func OpenAppWindow(rawURL, _ string) (<-chan struct{}, error) { return nil, OpenExternalURL(rawURL) }
 func OpenFolder(path string) error {
 	return exec.Command("xdg-open", path).Start()

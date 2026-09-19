@@ -82,6 +82,23 @@ func OpenExternalURL(rawURL string) error {
 	return nil
 }
 
+// RunInstaller запускает скачанный установщик в режиме обновления.
+//
+// Ждать его нельзя: он первым делом закрывает эту самую программу.
+func RunInstaller(path string) error {
+	command := exec.Command(path, "/update")
+	command.Dir = filepath.Dir(path)
+	// Скрывать нельзя: у установщика есть окно мастера, и человек должен
+	// видеть ход обновления. hideCommand кладёт SW_HIDE в STARTUPINFO, а
+	// Windows применяет это к первому окну процесса.
+	if err := command.Start(); err != nil {
+		return fmt.Errorf("не удалось запустить установщик: %w", err)
+	}
+	// Процесс живёт дольше нас — отпускаем его, чтобы не осталось зомби.
+	_ = command.Process.Release()
+	return nil
+}
+
 func OpenFolder(path string) error {
 	command := exec.Command("explorer.exe", path)
 	hideCommand(command)

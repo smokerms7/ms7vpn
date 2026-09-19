@@ -15,6 +15,20 @@ import (
 	"ms7vpn/internal/winui"
 )
 
+// openLogFile открывает журнал приложения на дозапись.
+// Ошибку глотаем: без журнала программа обязана работать.
+func openLogFile(dataDir string) *os.File {
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		return nil
+	}
+	file, err := os.OpenFile(filepath.Join(dataDir, "ms7vpn.log"),
+		os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return nil
+	}
+	return file
+}
+
 func main() {
 	autoConnect := flag.String("autoconnect", "", "node ID to connect after an elevated restart")
 	elevated := flag.Bool("elevated", false, "marks an elevated relaunch")
@@ -41,6 +55,19 @@ func main() {
 		log.Fatal(err)
 	}
 	dataDir := filepath.Join(base, "MS7VPN")
+
+	// Программа собрана с -H windowsgui: консоли нет, и всё, что пишет
+	// стандартный log, уходило в никуда. Из-за этого белое окно WebView2
+	// было нечем объяснить — в журнале не оставалось ни строчки, хотя
+	// библиотека пишет туда и ошибки, и log.Fatal. Направляем этот вывод
+	// в тот же файл, что ведёт само приложение.
+	if file := openLogFile(dataDir); file != nil {
+		defer file.Close()
+		log.SetOutput(file)
+		log.SetFlags(0)
+		log.SetPrefix("")
+	}
+
 	application, err := ms7app.New(dataDir)
 	if err != nil {
 		log.Fatal(err)
@@ -59,9 +86,11 @@ func main() {
 	// Основное окно — WebView2 с фирменным интерфейсом.
 	// Если WebView2 в системе нет, откатываемся на старое нативное окно.
 	if err := webui.Run(application, target); err != nil {
-		log.Printf("MS7VPN web UI: %v", err)
+		log.Printf("%s  окно WebView2 не открылось: %v",
+			time.Now().Format("2006-01-02 15:04:05"), err)
 		if err := winui.Run(application, target); err != nil {
-			log.Printf("MS7VPN UI: %v", err)
+			log.Printf("%s  запасное окно тоже не открылось: %v",
+				time.Now().Format("2006-01-02 15:04:05"), err)
 		}
 	}
 }

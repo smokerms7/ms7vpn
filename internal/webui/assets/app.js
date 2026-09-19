@@ -754,9 +754,14 @@
     await api('/api/open-data-folder', { method: 'POST', body: {} });
   }));
 
-  // Проверка обновлений. Программа ничего не скачивает и не ставит сама:
-  // она сообщает, есть ли версия новее, и открывает ссылку по нажатию.
+  // Проверка и установка обновлений.
+  //
+  // Раньше кнопка «Обновить» открывала браузер, и дальше человек ставил
+  // новую версию руками. Теперь программа скачивает установщик сама и
+  // передаёт работу ему: сама себя переписать она не может — Windows не
+  // даёт заменить работающий файл.
   let updateDownloadURL = '';
+  let updatePollTimer = null;
 
   function showUpdateState(kind, title, sub) {
     const icon = $('update-icon');
@@ -791,10 +796,72 @@
     }
   }
 
+  function stopUpdatePolling() {
+    if (updatePollTimer) {
+      clearInterval(updatePollTimer);
+      updatePollTimer = null;
+    }
+  }
+
+  // Ход обновления спрашиваем у программы: скачивание идёт в фоне, запрос
+  // на его запуск отвечает сразу и ничего не ждёт.
+  function watchUpdateProgress() {
+    stopUpdatePolling();
+    updatePollTimer = setInterval(async () => {
+      let progress;
+      try {
+        progress = await api('/api/update/progress');
+      } catch (error) {
+        return;
+      }
+      if (progress.stage === 'failed') {
+        stopUpdatePolling();
+        showUpdateState('err', 'Не удалось обновить', progress.error || progress.message || '');
+        toast(progress.error || 'Не удалось обновить', 'err');
+        restoreDownloadButton();
+        return;
+      }
+      if (progress.stage === 'starting') {
+        stopUpdatePolling();
+        showUpdateState('new', 'Запуск установщика',
+          'Программа закроется, дальше всё сделает установщик.');
+        return;
+      }
+      if (progress.message) {
+        setText($('update-sub'), progress.message);
+      }
+    }, 500);
+  }
+
+  // Надпись на кнопке запоминаем и возвращаем как было: вёрстку интерфейса
+  // трогать не нужно, текст берётся из неё.
+  let downloadButtonLabel = '';
+
+  function restoreDownloadButton() {
+    const button = $('update-download');
+    button.disabled = false;
+    if (downloadButtonLabel) setText(button, downloadButtonLabel);
+  }
+
+  async function installUpdate() {
+    const button = $('update-download');
+    if (!downloadButtonLabel) downloadButtonLabel = button.textContent;
+    button.disabled = true;
+    setText(button, 'Обновляем…');
+    showUpdateState('new', 'Обновление', 'Скачивание установщика…');
+    try {
+      await api('/api/update/install', { method: 'POST', body: {} });
+      watchUpdateProgress();
+    } catch (error) {
+      stopUpdatePolling();
+      showUpdateState('err', 'Не удалось обновить', error.message);
+      toast(error.message, 'err');
+      restoreDownloadButton();
+    }
+  }
+
   $('update-check').addEventListener('click', checkUpdate);
-  $('update-download').addEventListener('click', () => {
-    if (updateDownloadURL) openExternal(updateDownloadURL);
-  });
+  $('update-download').addEventListener('click', installUpdate);
 
   async function loadLog() {
     try {
@@ -814,4 +881,21 @@
   setInterval(refresh, 2500);
   timerHandle = setInterval(updateTimer, 1000);
   window.addEventListener('beforeunload', () => clearInterval(timerHandle));
+
+  // Маячок: сообщаем программе, что страница ожила. Без него программа не
+  // отличала «страница отдана» от «страница работает».
+  //
+  // Сначала маячок ждал двух кадров requestAnimationFrame. Так надёжнее по
+  // смыслу, но WebView2 не выдаёт кадры, пока окно не начало показываться, —
+  // получался замкнутый круг: программа считала окно мёртвым и переходила
+  // заново, обрывая отрисовку. Поэтому кадр остаётся быстрым путём, а
+  // страховкой идёт таймер. Повторный вызов на стороне программы безвреден.
+  let readySent = false;
+  function reportReady() {
+    if (readySent) return;
+    readySent = true;
+    api('/api/ui-ready', { method: 'POST', body: {} }).catch(() => {});
+  }
+  requestAnimationFrame(() => requestAnimationFrame(reportReady));
+  setTimeout(reportReady, 1200);
 })();
