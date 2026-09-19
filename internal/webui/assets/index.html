@@ -61,10 +61,6 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l9 9-9 9-9-9z"/></svg>
         Подписки
       </button>
-      <button type="button" class="nav-item" data-page="settings">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-        Настройки
-      </button>
       <button type="button" class="nav-item" data-page="info">
         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg>
         Информация
@@ -72,6 +68,10 @@
       <button type="button" class="nav-item" data-page="log">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h14v16H5z"/><path d="M8 8h8M8 12h8M8 16h5"/></svg>
         Журнал
+      </button>
+      <button type="button" class="nav-item" data-page="settings">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        Настройки
       </button>
     </nav>
 
@@ -89,7 +89,23 @@
       </div>
     </header>
 
+    <!-- Полоса обновления. Показывается сама, когда проверка нашла новую
+         версию: раньше человек узнавал об обновлении, только если сам лез
+         в «Информацию» и жал «Проверить». -->
+    <div class="update-banner" id="update-banner" hidden>
+      <span class="ub-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24"><path d="M12 3v12"/><path d="M7 11l5 5 5-5"/><path d="M5 21h14"/></svg>
+      </span>
+      <span class="ub-main">
+        <span class="ub-title" id="ub-title">Доступна новая версия</span>
+        <span class="ub-sub">Нажмите, чтобы обновиться</span>
+      </span>
+      <button type="button" class="ub-close" id="ub-close" aria-label="Скрыть">×</button>
+    </div>
+
     <section class="page is-active" id="page-home">
+      <div class="home-grid">
+      <div class="home-left">
       <div class="power-wrap">
         <button type="button" class="power" id="power-btn" aria-label="Подключить">
           <span class="power-ring"></span>
@@ -104,7 +120,9 @@
         <span class="chip-name" id="chip-name">Сервер не выбран</span>
         <span class="chip-action">сменить ›</span>
       </button>
+      </div>
 
+      <div class="home-right">
       <div class="grid-2 speed-row" id="speed-row">
         <div class="card speed">
           <span class="speed-value" id="speed-down">0.0<small>Мбит/с</small></span>
@@ -122,16 +140,14 @@
           <span class="sub-title" id="home-sub-name">—</span>
           <span class="badge" id="home-sub-status">Активна</span>
         </div>
-        <div class="sub-row" id="home-sub-expire-row">
-          <span>Действует до</span><b id="home-sub-expire">—</b>
+        <div class="sub-line">
+          <span id="home-sub-expire-row">Действует до <b id="home-sub-expire">—</b></span>
+          <span class="sub-dot">·</span>
+          <span class="badge is-quiet" id="home-sub-limit">—</span>
         </div>
-        <div class="sub-row"><span>Трафик</span><span class="badge is-quiet" id="home-sub-limit">—</span></div>
         <div class="bar" id="home-sub-bar"><i></i></div>
-        <div class="sub-row sub-usage">
-          <b id="home-sub-used">0 ГБ</b><span id="home-sub-left">—</span>
-        </div>
         <div class="sub-foot">
-          <span class="hint" id="home-sub-hint">—</span>
+          <span class="hint"><b id="home-sub-used">0 ГБ</b> <span id="home-sub-left">—</span> <span class="sub-dot">·</span> <span id="home-sub-hint">—</span></span>
           <button type="button" class="btn btn-ghost btn-small" id="home-sub-refresh">Обновить подписку</button>
         </div>
       </div>
@@ -141,6 +157,8 @@
       </p>
 
       <p class="notice" id="home-notice" hidden></p>
+      </div>
+      </div>
     </section>
 
     <section class="page" id="page-servers">
@@ -273,7 +291,10 @@
     <section class="page" id="page-log">
       <div class="page-head">
         <h2>Журнал</h2>
-        <div class="page-actions"><button type="button" class="btn btn-ghost" id="log-refresh">Обновить</button></div>
+        <div class="page-actions">
+          <button type="button" class="btn btn-ghost" id="log-clear">Очистить</button>
+          <button type="button" class="btn btn-ghost" id="log-refresh">Обновить</button>
+        </div>
       </div>
       <div class="card events-card">
         <span class="card-label">Последние события</span>

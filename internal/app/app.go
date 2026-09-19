@@ -194,6 +194,7 @@ func (a *App) RegisterRoutes(mux *http.ServeMux, token string) {
 	mux.HandleFunc("/api/disconnect", withAuth(a.handleDisconnect))
 	mux.HandleFunc("/api/settings", withAuth(a.handleSettings))
 	mux.HandleFunc("/api/log", withAuth(a.handleLog))
+	mux.HandleFunc("/api/log/clear", withAuth(a.handleClearLog))
 	mux.HandleFunc("/api/open", withAuth(a.handleOpenURL))
 	mux.HandleFunc("/api/open-data-folder", withAuth(a.handleOpenDataFolder))
 	mux.HandleFunc("/api/elevate", withAuth(a.handleElevate))
@@ -990,6 +991,29 @@ func (a *App) handleSettings(w http.ResponseWriter, r *http.Request) {
 	state := a.state
 	a.mu.Unlock()
 	writeOK(w, state)
+}
+
+// handleClearLog очищает журнал приложения.
+//
+// Файл обрезается, а не удаляется: он открыт на дозапись и самим
+// приложением, и стандартным журналом Go. Удалённый файл продолжил бы
+// «писаться» в никуда через уже открытый дескриптор, и записи пропадали бы
+// до перезапуска программы.
+func (a *App) handleClearLog(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, methodError())
+		return
+	}
+	path := filepath.Join(a.dataDir, "ms7vpn.log")
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError,
+			&APIError{Code: "LOG_CLEAR_FAILED", Message: "Не удалось очистить журнал: " + err.Error()})
+		return
+	}
+	_ = file.Close()
+	a.logf("журнал очищен")
+	writeOK(w, map[string]bool{"cleared": true})
 }
 
 func (a *App) handleLog(w http.ResponseWriter, r *http.Request) {

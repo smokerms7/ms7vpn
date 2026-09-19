@@ -537,3 +537,93 @@ select option { background: #15101F; }
 .update-card .row-main { min-width: 0; }
 
 .field-hint { color: var(--muted); font-size: 11.5px; line-height: 1.45; }
+
+
+/* ==== полоса обновления ====
+   Раньше о новой версии можно было узнать, только зайдя в «Информацию»
+   и нажав «Проверить». Большинство туда не заходит. */
+.update-banner {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 14px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(176, 38, 255, 0.45);
+  background: linear-gradient(120deg, rgba(176, 38, 255, 0.16), rgba(123, 44, 255, 0.10));
+  cursor: pointer;
+  flex: none;
+}
+.update-banner[hidden] { display: none; }
+.update-banner .ub-icon {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  flex: none;
+  border-radius: 11px;
+  background: linear-gradient(120deg, var(--accent), var(--accent-2));
+}
+.update-banner .ub-icon svg {
+  width: 20px; height: 20px;
+  stroke: #fff; fill: none;
+  stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
+}
+.update-banner .ub-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.update-banner .ub-title { font-weight: 700; }
+.update-banner .ub-sub { font-size: 12px; color: var(--muted); }
+.update-banner .ub-close {
+  margin-left: auto;
+  flex: none;
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  border: 1px solid var(--panel-line);
+  background: transparent;
+  color: var(--muted);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+.update-banner .ub-close:hover { color: var(--text); background: rgba(255, 255, 255, 0.05); }
+
+/* ==== главный экран ====
+   Раскладка прежняя, в один столбик. Размеры привязаны к высоте окна,
+   чтобы содержимое влезало без прокрутки и на минимальном размере, и на
+   развёрнутом окне не выглядело потерянным.
+
+   Тянутся только крупные вещи: кнопка, отступы, поля карточек. Подписи и
+   значения зажаты узкими рамками - без них на большом окне цифра скорости
+   заняла бы пол-экрана, а на низком стала бы мельче своей подписи. */
+.home-grid { display: flex; flex-direction: column; gap: clamp(4px, 1.5vh, 20px); }
+.home-left { display: flex; flex-direction: column; align-items: center; gap: clamp(3px, 1.1vh, 14px); }
+.home-right { display: flex; flex-direction: column; gap: clamp(6px, 1.6vh, 18px); }
+
+.power { width: clamp(78px, 21vh, 240px); height: clamp(78px, 21vh, 240px); }
+.power svg { width: clamp(28px, 7.2vh, 84px); height: clamp(28px, 7.2vh, 84px); }
+.power-wrap { gap: clamp(6px, 1vh, 12px); }
+.power-label { font-size: clamp(14px, 1.9vh, 20px); }
+.power-timer { font-size: clamp(12px, 1.5vh, 16px); }
+
+.server-chip { padding: clamp(6px, 1.3vh, 14px) 16px; }
+
+.speed { padding: clamp(5px, 1.6vh, 22px) 16px; }
+.speed-value { font-size: clamp(22px, 3.6vh, 38px); }
+
+/* Карточка подписки: было шесть строк, стало четыре. */
+.sub-card { padding: clamp(8px, 1.8vh, 20px) 16px; gap: clamp(4px, 1.1vh, 12px); }
+.sub-line { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
+.sub-line b { color: var(--text); }
+.sub-dot { opacity: 0.4; }
+
+/* Поля основной области тоже тянутся: на минимальном окне лишние
+   26 точек снизу решали, влезет строка режима или нет. */
+.main { padding: clamp(10px, 2.4vh, 24px) 28px clamp(4px, 2.2vh, 26px); }
+
+/* Строка режима прижата к содержимому: на минимальном окне её отступ
+   решал, влезет она или уедет за край. */
+.mode-line { margin: 0; font-size: clamp(11px, 1.4vh, 13px); }
+
+/* Верхний отступ страницы тоже тянется. Нижний отступ содержимое не
+   поднимает - он стоит после него, - а этот поднимает. */
+.page { padding-top: clamp(2px, 1vh, 10px); }

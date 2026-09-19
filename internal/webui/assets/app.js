@@ -823,6 +823,7 @@
       }
       if (progress.stage === 'starting') {
         stopUpdatePolling();
+        $('update-banner').hidden = true;
         showUpdateState('new', 'Запуск установщика',
           'Программа закроется, дальше всё сделает установщик.');
         return;
@@ -863,6 +864,50 @@
   $('update-check').addEventListener('click', checkUpdate);
   $('update-download').addEventListener('click', installUpdate);
 
+  /* ==================== полоса обновления ==================== */
+
+  // Программа сама спрашивает сервер обновлений: через десять секунд после
+  // запуска и дальше раз в шесть часов. Десять секунд - чтобы не мешать
+  // подключению в первые мгновения.
+  let bannerDismissed = false;
+
+  function showUpdateBanner(version) {
+    if (bannerDismissed) return;
+    const banner = $('update-banner');
+    setText($('ub-title'), 'Доступна версия ' + version);
+    banner.hidden = false;
+  }
+
+  async function watchForUpdates() {
+    if (bannerDismissed) return;
+    try {
+      const result = await api('/api/update/check', { method: 'POST', body: {} });
+      updateDownloadURL = result.downloadUrl || '';
+      if (result.hasUpdate) {
+        showUpdateBanner(result.latest);
+        showUpdateState('new', 'Доступна версия ' + result.latest,
+          result.notes || ('Установлена ' + result.current));
+      }
+    } catch (error) {
+      // Молча: нет сети или сервер недоступен - это не повод беспокоить
+      // человека всплывашкой при каждом запуске.
+    }
+  }
+
+  $('update-banner').addEventListener('click', (event) => {
+    if (event.target.closest('#ub-close')) return;
+    openPage('info');
+  });
+
+  $('ub-close').addEventListener('click', (event) => {
+    event.stopPropagation();
+    bannerDismissed = true;
+    $('update-banner').hidden = true;
+  });
+
+  setTimeout(watchForUpdates, 10000);
+  setInterval(watchForUpdates, 6 * 60 * 60 * 1000);
+
   async function loadLog() {
     try {
       const data = await api('/api/log');
@@ -872,6 +917,16 @@
     }
   }
   $('log-refresh').addEventListener('click', loadLog);
+
+  // Очистка журнала. Файл не удаляем, а обрезаем: он открыт на дозапись
+  // самой программой, и удалённый файл продолжал бы «писаться» в никуда.
+  $('log-clear').addEventListener('click', () => guard(async () => {
+    await api('/api/log/clear', { method: 'POST', body: {} });
+    events.length = 0;
+    renderEvents();
+    $('log-body').textContent = 'Журнал пуст.';
+    toast('Журнал очищен', 'ok');
+  }));
   renderEvents();
 
   /* ==================== запуск ==================== */
