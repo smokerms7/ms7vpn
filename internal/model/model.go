@@ -2,7 +2,7 @@ package model
 
 import "time"
 
-const AppVersion = "ms7.vs2.1"
+const AppVersion = "ms7.vs2.2"
 
 type UserInfo struct {
 	UploadBytes   int64 `json:"uploadBytes,omitempty"`
@@ -61,6 +61,9 @@ type Settings struct {
 	// Адрес файла с описанием последней сборки. Меняется в настройках —
 	// сервер обновлений может переехать без перевыпуска программы.
 	UpdateURL string `json:"updateUrl"`
+
+	// Оформление окна: brand (фирменное), light (светлое), dark (чёрное).
+	Theme string `json:"theme"`
 }
 
 type CoreState struct {
@@ -116,8 +119,17 @@ func DefaultSettings() Settings {
 		TestURL:        "https://www.gstatic.com/generate_204",
 		SupportURL:     "https://t.me/ms7support",
 		UpdateURL:      "https://github.com/smokerms7/ms7vpn",
+		Theme:          ThemeBrand,
 	}
 }
+
+// Оформления окна. Пустое значение в старых файлах состояния означает
+// фирменное — так установки, сделанные до появления выбора, не меняют вид.
+const (
+	ThemeBrand = "brand"
+	ThemeLight = "light"
+	ThemeDark  = "dark"
+)
 
 func DefaultState() AppState {
 	return AppState{

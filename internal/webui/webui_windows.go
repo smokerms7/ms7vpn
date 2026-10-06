@@ -29,6 +29,7 @@ import (
 	"golang.org/x/sys/windows"
 
 	ms7app "ms7vpn/internal/app"
+	"ms7vpn/internal/model"
 )
 
 // deviceInfo — данные для раздела «Информация».
@@ -65,15 +66,19 @@ var assetsFS embed.FS
 //go:embed icon/MS7VPN.ico
 var windowIcon []byte
 
-// enableDarkTitleBar красит системную полосу окна в тёмный цвет,
-// чтобы она не была белой на фоне тёмного интерфейса.
-func enableDarkTitleBar(handle uintptr) {
+// applyTitleBar красит системную полосу окна под выбранное оформление, чтобы
+// она не спорила с интерфейсом: белая полоса над тёмным окном и чёрная над
+// светлым одинаково заметны.
+//
+// Цвет ставится один раз при создании окна. Переключение темы на ходу его не
+// меняет: окно уже создано, а перекрашивать полосу из страницы нечем — поэтому
+// в настройках и написано, что полоса подхватит цвет после перезапуска.
+func applyTitleBar(handle uintptr, theme string) {
 	if handle == 0 {
 		return
 	}
 	dwm := windows.NewLazySystemDLL("dwmapi.dll")
 	setAttribute := dwm.NewProc("DwmSetWindowAttribute")
-	enabled := int32(1)
 	const (
 		useImmersiveDarkMode    = 20
 		useImmersiveDarkModePre = 19
@@ -81,12 +86,29 @@ func enableDarkTitleBar(handle uintptr) {
 		textColor               = 36
 		borderColor             = 34
 	)
-	setAttribute.Call(handle, useImmersiveDarkMode, uintptr(unsafe.Pointer(&enabled)), 4)
-	setAttribute.Call(handle, useImmersiveDarkModePre, uintptr(unsafe.Pointer(&enabled)), 4)
-	// Windows 11: цвет полосы и текста в тон интерфейса (COLORREF = 0x00BBGGRR).
-	caption := int32(0x000D0A16)
-	text := int32(0x00F8F0F3)
-	border := int32(0x00331D24)
+
+	// COLORREF = 0x00BBGGRR — порядок байт обратный привычному HTML.
+	var caption, text, border int32
+	darkMode := int32(1)
+	switch theme {
+	case model.ThemeLight:
+		darkMode = 0
+		caption = 0x00F9F3F5 // #F5F3F9
+		text = 0x001C1215    // #15121C
+		border = 0x00EBDFE3  // #E3DFEB
+	case model.ThemeDark:
+		caption = 0x000A0A0A
+		text = 0x00FFFFFF
+		border = 0x00262626
+	default: // фирменное
+		caption = 0x000D0A16
+		text = 0x00F8F0F3
+		border = 0x00331D24
+	}
+
+	setAttribute.Call(handle, useImmersiveDarkMode, uintptr(unsafe.Pointer(&darkMode)), 4)
+	setAttribute.Call(handle, useImmersiveDarkModePre, uintptr(unsafe.Pointer(&darkMode)), 4)
+	// Windows 11: цвет полосы и текста в тон интерфейса.
 	setAttribute.Call(handle, captionColor, uintptr(unsafe.Pointer(&caption)), 4)
 	setAttribute.Call(handle, textColor, uintptr(unsafe.Pointer(&text)), 4)
 	setAttribute.Call(handle, borderColor, uintptr(unsafe.Pointer(&border)), 4)
@@ -159,6 +181,32 @@ func newToken() (string, error) {
 	return hex.EncodeToString(buf), nil
 }
 
+// localHost проверяет, что запрос пришёл на петлевой адрес по имени
+// 127.0.0.1 или localhost.
+//
+// Без этой проверки сервер отвечал бы и на запрос с чужим заголовком Host.
+// Так работает подмена DNS: страница в браузере просит адрес, который
+// злоумышленник сначала указывает на свой сервер, а через минуту — на
+// 127.0.0.1. Для браузера это один и тот же источник, поэтому запрет
+// межсайтовых запросов не срабатывает, и страница читает ответ нашего
+// сервера как свой собственный.
+func localHost(r *http.Request) bool {
+	host := r.Host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+	return host == "127.0.0.1" || host == "::1" || host == "localhost"
+}
+
+// authorized пропускает только локальные запросы с верным токеном.
+func authorized(r *http.Request, token string) bool {
+	if !localHost(r) {
+		return false
+	}
+	return r.Header.Get("X-MS7-Token") == token || r.URL.Query().Get("token") == token
+}
+
 // Run поднимает локальный сервер на 127.0.0.1 и открывает окно WebView2.
 // Возвращает ошибку, если WebView2 недоступен — вызывающий код может
 // откатиться на старое нативное окно.
@@ -182,7 +230,7 @@ func Run(app *ms7app.App, autoConnect string) error {
 	mux := http.NewServeMux()
 	app.RegisterRoutes(mux, token)
 	mux.HandleFunc("/api/device", func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("X-MS7-Token") != token && r.URL.Query().Get("token") != token {
+		if !authorized(r, token) {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
@@ -206,7 +254,7 @@ func Run(app *ms7app.App, autoConnect string) error {
 	// белым, если WebView2 её не показал.
 	var uiReady atomic.Bool
 	mux.HandleFunc("/api/ui-ready", func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("X-MS7-Token") != token && r.URL.Query().Get("token") != token {
+		if !authorized(r, token) {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
@@ -216,21 +264,43 @@ func Run(app *ms7app.App, autoConnect string) error {
 	})
 	fileServer := http.FileServer(http.FS(static))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		// Окно открывается только с локального адреса и только этим процессом.
 		logRequest(r.URL.Path)
+		// Всё отдаём только на петлевой адрес: запрос с чужим заголовком Host
+		// отбиваем, чтобы подмена DNS не выдала страницу за свою.
+		if !localHost(r) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
 		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+
 		if r.URL.Path == "/" || r.URL.Path == "/index.html" {
+			// Саму страницу отдаём только по токену. Раньше проверки здесь не
+			// было, а страница содержала токен — любой процесс пользователя мог
+			// запросить корень, вынуть токен и получить полный доступ к API:
+			// подключение, настройки, запуск установщика.
+			//
+			// Токен в страницу больше не подставляется: скрипт забирает его из
+			// адреса окна. Так даже сохранённая копия страницы бесполезна.
+			if !authorized(r, token) {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
 			page, readErr := fs.ReadFile(static, "index.html")
 			if readErr != nil {
 				http.Error(w, "UI missing", http.StatusInternalServerError)
 				return
 			}
-			body := strings.ReplaceAll(string(page), "__MS7_TOKEN__", token)
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			_, _ = w.Write([]byte(body))
+			w.Header().Set("X-Frame-Options", "DENY")
+			w.Header().Set("Referrer-Policy", "no-referrer")
+			_, _ = w.Write(page)
 			pageLoads.Add(1)
 			return
 		}
+		// Стили, скрипты и картинки токена не требуют: страница запрашивает их
+		// относительными ссылками, в которых токена нет. Секретов в них тоже
+		// нет — всё это лежит внутри exe и в открытом репозитории.
 		fileServer.ServeHTTP(w, r)
 	})
 
@@ -292,7 +362,7 @@ func Run(app *ms7app.App, autoConnect string) error {
 	defer view.Destroy()
 
 	applyWindowIcon(uintptr(view.Window()), app.DataDir())
-	enableDarkTitleBar(uintptr(view.Window()))
+	applyTitleBar(uintptr(view.Window()), app.Snapshot().Settings.Theme)
 	view.SetSize(minWidth, minHeight, webview2.HintMin)
 	view.SetSize(windowWidth, windowHeight, webview2.HintNone)
 

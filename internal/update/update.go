@@ -11,9 +11,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"hash"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -51,19 +52,62 @@ type Manifest struct {
 }
 
 // resolveSum возвращает готовую сумму: либо ту, что уже есть, либо скачанную
-// по ссылке. Отсутствие суммы не ошибка — проверка тогда просто не делается.
-func resolveSum(ctx context.Context, sum, sumURL string) string {
+// по ссылке.
+//
+// Отсутствие суммы — ошибка. Раньше функция молча возвращала пустую строку, а
+// Download при пустой сумме пропускал сверку: достаточно было не положить в
+// выпуск файл .sha256, и произвольный exe запускался без единой проверки.
+func resolveSum(ctx context.Context, sum, sumURL string) (string, error) {
 	if sum = strings.TrimSpace(sum); sum != "" {
-		return sum
+		if !looksLikeSHA256(sum) {
+			return "", fmt.Errorf("контрольная сумма в ответе сервера неверного вида")
+		}
+		return strings.ToLower(sum), nil
 	}
 	if sumURL = strings.TrimSpace(sumURL); sumURL == "" {
-		return ""
+		return "", fmt.Errorf("в выпуске нет файла с контрольной суммой — обновление не подтверждено")
 	}
 	fetched, err := FetchSHA256(ctx, sumURL)
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("не удалось получить контрольную сумму: %w", err)
 	}
-	return fetched
+	return fetched, nil
+}
+
+// looksLikeSHA256 проверяет, что строка — именно 64 шестнадцатеричных знака.
+func looksLikeSHA256(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
+}
+
+// requireHTTPS не пускает обновление по открытому каналу.
+//
+// Прежнее условие принимало и http://, хотя сообщение об ошибке обещало
+// обратное: по открытому каналу установщик можно подменить на лету.
+//
+// Исключение — петлевой адрес: трафик до 127.0.0.1 не покидает машину, его
+// нечем перехватить. На этом же держатся тесты, которые поднимают локальный
+// http-сервер.
+func requireHTTPS(rawURL, what string) error {
+	if strings.HasPrefix(rawURL, "https://") {
+		return nil
+	}
+	if parsed, err := url.Parse(rawURL); err == nil && parsed.Scheme == "http" && isLoopbackHost(parsed.Hostname()) {
+		return nil
+	}
+	return fmt.Errorf("%s должен начинаться с https:// — по открытому каналу обновление не принимается", what)
+}
+
+// isLoopbackHost сообщает, указывает ли имя узла на саму машину.
+func isLoopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // Result — что показать человеку.
@@ -103,8 +147,15 @@ func Check(ctx context.Context, source, currentVersion string) (Result, error) {
 	result.HasUpdate = Newer(result.Latest, currentVersion)
 	// За суммой ходим только когда обновление есть: иначе каждая проверка
 	// делала бы лишний запрос ради файла, который никому не нужен.
+	//
+	// Нет суммы — не отдаём и ссылку на скачивание: пусть лучше обновление
+	// покажется недоступным, чем установится неподтверждённый файл.
 	if result.HasUpdate {
-		result.SHA256 = resolveSum(ctx, manifest.SHA256, manifest.SHA256URL)
+		sum, sumErr := resolveSum(ctx, manifest.SHA256, manifest.SHA256URL)
+		if sumErr != nil {
+			return result, sumErr
+		}
+		result.SHA256 = sum
 	}
 	return result, nil
 }
@@ -120,10 +171,14 @@ func LatestPayload(ctx context.Context, source, currentVersion string) (Payload,
 		return Payload{}, fmt.Errorf("в выпуске %s нет вложения %s",
 			strings.TrimSpace(manifest.Version), PayloadAssetName)
 	}
+	sum, err := resolveSum(ctx, manifest.PayloadSHA256, manifest.PayloadSHA256URL)
+	if err != nil {
+		return Payload{}, err
+	}
 	return Payload{
 		Version: strings.TrimSpace(manifest.Version),
 		URL:     url,
-		SHA256:  resolveSum(ctx, manifest.PayloadSHA256, manifest.PayloadSHA256URL),
+		SHA256:  sum,
 	}, nil
 }
 
@@ -132,8 +187,8 @@ func fetchManifest(ctx context.Context, source, currentVersion string) (Manifest
 	if source == "" {
 		return Manifest{}, fmt.Errorf("адрес проверки обновлений не задан")
 	}
-	if !strings.HasPrefix(source, "https://") && !strings.HasPrefix(source, "http://") {
-		return Manifest{}, fmt.Errorf("адрес проверки обновлений должен начинаться с https://")
+	if err := requireHTTPS(source, "адрес проверки обновлений"); err != nil {
+		return Manifest{}, err
 	}
 
 	requestURL, isGitHub := githubReleasesURL(source)
@@ -198,8 +253,14 @@ func Download(ctx context.Context, url, expectedSHA256, namePattern string, prog
 	if url == "" {
 		return "", fmt.Errorf("адрес файла не задан")
 	}
-	if !strings.HasPrefix(url, "https://") && !strings.HasPrefix(url, "http://") {
-		return "", fmt.Errorf("адрес файла должен начинаться с https://")
+	if err := requireHTTPS(url, "адрес файла"); err != nil {
+		return "", err
+	}
+	// Без суммы не скачиваем вовсе. Прежде проверка просто пропускалась, и
+	// запускался файл, целостность которого никто не подтверждал.
+	expectedSHA256 = strings.TrimSpace(expectedSHA256)
+	if !looksLikeSHA256(expectedSHA256) {
+		return "", fmt.Errorf("нет контрольной суммы файла — скачивание отменено")
 	}
 
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -230,12 +291,8 @@ func Download(ctx context.Context, url, expectedSHA256, namePattern string, prog
 	}
 	path := file.Name()
 
-	var digest hash.Hash
-	var writer io.Writer = file
-	if expectedSHA256 != "" {
-		digest = sha256.New()
-		writer = io.MultiWriter(file, digest)
-	}
+	digest := sha256.New()
+	var writer io.Writer = io.MultiWriter(file, digest)
 
 	written, copyErr := copyWithProgress(ctx, writer,
 		io.LimitReader(response.Body, maxDownloadBytes+1), response.ContentLength, progress)
@@ -256,12 +313,10 @@ func Download(ctx context.Context, url, expectedSHA256, namePattern string, prog
 		_ = os.Remove(path)
 		return "", fmt.Errorf("файл скачан не полностью: %d из %d байт", written, size)
 	}
-	if digest != nil {
-		actual := hex.EncodeToString(digest.Sum(nil))
-		if !strings.EqualFold(actual, expectedSHA256) {
-			_ = os.Remove(path)
-			return "", fmt.Errorf("контрольная сумма не совпала — файл повреждён или подменён")
-		}
+	actual := hex.EncodeToString(digest.Sum(nil))
+	if !strings.EqualFold(actual, expectedSHA256) {
+		_ = os.Remove(path)
+		return "", fmt.Errorf("контрольная сумма не совпала — файл повреждён или подменён")
 	}
 	return path, nil
 }
@@ -319,7 +374,12 @@ func ParseSHA256File(content string) string {
 
 // FetchSHA256 скачивает небольшой файл с контрольной суммой.
 func FetchSHA256(ctx context.Context, url string) (string, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimSpace(url), nil)
+	url = strings.TrimSpace(url)
+	// Сумма по открытому каналу бессмысленна: кто подменит файл, подменит и её.
+	if err := requireHTTPS(url, "адрес контрольной суммы"); err != nil {
+		return "", err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", err
 	}

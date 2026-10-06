@@ -3,11 +3,56 @@
 (() => {
   'use strict';
 
-  const TOKEN = window.MS7_TOKEN || new URLSearchParams(location.search).get('token') || '';
+  // Токен берём только из адреса окна. В саму страницу он больше не
+  // подставляется: раньше любой процесс мог запросить корень и вынуть его
+  // прямо из HTML.
+  const TOKEN = new URLSearchParams(location.search).get('token') || '';
   const AUTO_CONNECT = new URLSearchParams(location.search).get('autoconnect') || '';
   const BOT_URL = 'https://t.me/ms7vpn_bot';
   const flags = window.MS7Flags;
   let device = null;
+
+  // ==== оформление ====
+  // Настоящее значение приходит с состоянием из Go. Но состояние запрашивается
+  // уже после отрисовки страницы, поэтому выбранную тему дополнительно
+  // запоминаем в профиле окна и ставим сразу — иначе светлая тема успевала
+  // мигнуть тёмной.
+  const THEMES = ['brand', 'light', 'dark'];
+  let theme = 'brand';
+  // Пока человек не сохранил выбор, фоновый опрос состояния не должен
+  // возвращать прежнюю тему: иначе выбранный цвет откатывался бы через
+  // пару секунд или при переходе на другую страницу.
+  let themeTouched = false;
+
+  function applyTheme(name) {
+    const next = THEMES.includes(name) ? name : 'brand';
+    if (next === theme && document.documentElement.dataset.themeApplied === next) return;
+    theme = next;
+    document.documentElement.dataset.themeApplied = theme;
+    // Фирменная тема — оформление по умолчанию, у неё атрибута нет.
+    if (theme === 'brand') document.documentElement.removeAttribute('data-theme');
+    else document.documentElement.setAttribute('data-theme', theme);
+    // Обращаемся к DOM напрямую: помощник $ объявлен ниже, а эта функция
+    // вызывается ещё до него, при первом применении запомненной темы.
+    const group = document.getElementById('set-theme');
+    if (group) {
+      for (const button of group.querySelectorAll('[data-theme-value]')) {
+        button.setAttribute('aria-checked', String(button.dataset.themeValue === theme));
+      }
+    }
+    try {
+      localStorage.setItem('ms7-theme', theme);
+    } catch (_) {
+      // Профиль окна может быть недоступен — тема просто не запомнится.
+    }
+  }
+
+  try {
+    const remembered = localStorage.getItem('ms7-theme');
+    if (remembered) applyTheme(remembered);
+  } catch (_) {
+    // Ничего не делаем: останется фирменная тема.
+  }
 
   let state = null;
   let busy = false;
@@ -470,6 +515,7 @@
     $('set-testurl').value = settings.testUrl || '';
     $('set-support').value = settings.supportUrl || '';
     $('set-update').value = settings.updateUrl || '';
+    if (!themeTouched) applyTheme(settings.theme);
   }
 
   function renderInfo() {
@@ -744,11 +790,22 @@
         dns2: $('set-dns2').value.trim(),
         testUrl: $('set-testurl').value.trim(),
         supportUrl: $('set-support').value.trim(),
-        updateUrl: $('set-update').value.trim()
+        updateUrl: $('set-update').value.trim(),
+        theme
       }
     });
+    themeTouched = false;
     toast('Настройки сохранены', 'ok');
   }));
+
+  // Тема применяется сразу по нажатию, чтобы было видно, что выбираешь.
+  // В настройках она закрепится после «Сохранить».
+  $('set-theme').addEventListener('click', (event) => {
+    const button = event.target.closest('[data-theme-value]');
+    if (!button) return;
+    themeTouched = true;
+    applyTheme(button.dataset.themeValue);
+  });
 
   $('open-folder').addEventListener('click', () => guard(async () => {
     await api('/api/open-data-folder', { method: 'POST', body: {} });

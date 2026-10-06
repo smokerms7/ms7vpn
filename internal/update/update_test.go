@@ -33,8 +33,10 @@ func TestNewerHandlesProjectVersionSchemes(t *testing.T) {
 }
 
 func TestCheckReportsUpdate(t *testing.T) {
+	const sum = "d004c39288ce9ada487c6f398c7c545f7d749e44bdfdd59dbc9f865afba4e1ad"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = fmt.Fprint(w, `{"version":"ms7.vs1.5","url":"https://example.com/setup.exe","notes":"Быстрее"}`)
+		_, _ = fmt.Fprintf(w,
+			`{"version":"ms7.vs1.5","url":"https://example.com/setup.exe","sha256":%q,"notes":"Быстрее"}`, sum)
 	}))
 	defer server.Close()
 
@@ -44,6 +46,41 @@ func TestCheckReportsUpdate(t *testing.T) {
 	}
 	if !result.HasUpdate || result.Latest != "ms7.vs1.5" || result.DownloadURL == "" {
 		t.Fatalf("%+v", result)
+	}
+	if result.SHA256 != sum {
+		t.Fatalf("сумма не донесена до результата: %q", result.SHA256)
+	}
+}
+
+// Выпуск без контрольной суммы принимать нельзя: прежде проверка в этом случае
+// просто пропускалась, и запускался неподтверждённый установщик.
+func TestCheckRejectsReleaseWithoutSum(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `{"version":"ms7.vs1.5","url":"https://example.com/setup.exe"}`)
+	}))
+	defer server.Close()
+
+	if _, err := Check(context.Background(), server.URL, "ms7.vs1.2"); err == nil {
+		t.Fatal("обновление без контрольной суммы должно быть отклонено")
+	}
+}
+
+// Обновление по открытому каналу не принимается, кроме петлевого адреса.
+func TestCheckRejectsPlainHTTP(t *testing.T) {
+	if _, err := Check(context.Background(), "http://example.com/latest.json", "ms7.vs1.2"); err == nil {
+		t.Fatal("http:// на внешнем узле должен быть отклонён")
+	}
+}
+
+// Скачивание без суммы не начинается вовсе.
+func TestDownloadRequiresSum(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, "polezno")
+	}))
+	defer server.Close()
+
+	if _, err := Download(context.Background(), server.URL, "", "ms7vpn-test-*", nil); err == nil {
+		t.Fatal("скачивание без контрольной суммы должно быть отклонено")
 	}
 }
 

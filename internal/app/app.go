@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -100,6 +101,10 @@ func New(dataDir string) (*App, error) {
 		state.Connection.LastError = err.Error()
 	}
 	state.Version = model.AppVersion
+	// Настройки с диска прогоняем через те же проверки, что и присланные из
+	// интерфейса: иначе один раз записанный чужой адрес обновлений жил бы до
+	// первого сохранения настроек.
+	state.Settings = normalizeSettings(state.Settings)
 	application := &App{
 		state: state, store: st, fetcher: subscription.NewFetcher(dataDir),
 		dataDir: dataDir, done: make(chan struct{}),
@@ -1229,10 +1234,49 @@ func normalizeSettings(settings model.Settings) model.Settings {
 	if strings.TrimSpace(settings.SupportURL) == "" {
 		settings.SupportURL = defaults.SupportURL
 	}
-	if strings.TrimSpace(settings.UpdateURL) == "" {
+	if !allowedUpdateURL(settings.UpdateURL) {
 		settings.UpdateURL = defaults.UpdateURL
 	}
+	switch settings.Theme {
+	case model.ThemeBrand, model.ThemeLight, model.ThemeDark:
+	default:
+		settings.Theme = defaults.Theme
+	}
 	return settings
+}
+
+// updateHosts — узлы, с которых принимается обновление.
+var updateHosts = []string{
+	"github.com",
+	"api.github.com",
+	"objects.githubusercontent.com",
+	"ms7pc.shop",
+	"vpn.ms7pc.shop",
+}
+
+// allowedUpdateURL проверяет, что адрес проверки обновлений указывает на наш
+// узел и ведёт по https.
+//
+// Адрес приходит из настроек, то есть через /api/settings. Прежде он
+// принимался любой непустой строкой: получив локальный токен, можно было
+// подставить свой сервер обновлений и дёрнуть установку — то есть запустить
+// на машине произвольный файл. Теперь чужой адрес молча заменяется на свой.
+func allowedUpdateURL(rawURL string) bool {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		return false
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.Scheme != "https" {
+		return false
+	}
+	host := strings.ToLower(parsed.Hostname())
+	for _, allowed := range updateHosts {
+		if host == allowed || strings.HasSuffix(host, "."+allowed) {
+			return true
+		}
+	}
+	return false
 }
 
 func methodError() *APIError {

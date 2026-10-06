@@ -206,6 +206,24 @@
             <option value="system-proxy">Системный прокси</option>
           </select>
         </label>
+        <div class="field">
+          <span>Оформление</span>
+          <div class="themes" id="set-theme" role="radiogroup" aria-label="Оформление">
+            <button type="button" class="theme" data-theme-value="brand" role="radio" aria-checked="true">
+              <span class="theme-swatch theme-swatch-brand"></span>
+              <span class="theme-name">Основная</span>
+            </button>
+            <button type="button" class="theme" data-theme-value="light" role="radio" aria-checked="false">
+              <span class="theme-swatch theme-swatch-light"></span>
+              <span class="theme-name">Светлая</span>
+            </button>
+            <button type="button" class="theme" data-theme-value="dark" role="radio" aria-checked="false">
+              <span class="theme-swatch theme-swatch-dark"></span>
+              <span class="theme-name">Тёмная</span>
+            </button>
+          </div>
+          <small class="field-hint">Цвет применяется сразу. Полоса окна подхватит его после перезапуска.</small>
+        </div>
         <label class="switch">
           <input type="checkbox" id="set-autorefresh">
           <span>Обновлять подписки автоматически</span>
@@ -307,7 +325,6 @@
 
 <div class="toast" id="toast" hidden></div>
 
-<script>window.MS7_TOKEN = "__MS7_TOKEN__";</script>
 <script src="flags.js"></script>
 <script src="app.js"></script>
 </body>
