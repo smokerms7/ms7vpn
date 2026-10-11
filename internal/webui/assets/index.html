@@ -106,6 +106,8 @@
     <section class="page is-active" id="page-home">
       <div class="home-grid">
       <div class="home-left">
+      <h2 class="home-title" id="home-title" hidden>Запрет</h2>
+
       <div class="power-wrap">
         <button type="button" class="power" id="power-btn" aria-label="Подключить">
           <span class="power-ring"></span>
@@ -123,6 +125,19 @@
       </div>
 
       <div class="home-right">
+      <!-- Плитки режима «Запрет». Сервера и пинга здесь нет: трафик идёт
+           напрямую, сервер не используется, а пинг остаётся родным. -->
+      <div class="grid-2 zapret-row" id="zapret-row" hidden>
+        <div class="card speed">
+          <span class="card-value" id="zapret-strategy">—</span>
+          <span class="speed-label">Стратегия</span>
+        </div>
+        <div class="card speed">
+          <span class="card-value" id="zapret-session">00:00:00</span>
+          <span class="speed-label">Сессия</span>
+        </div>
+      </div>
+
       <div class="grid-2 speed-row" id="speed-row">
         <div class="card speed">
           <span class="speed-value" id="speed-down">0.0<small>Мбит/с</small></span>
@@ -198,8 +213,41 @@
 
     <section class="page" id="page-settings">
       <div class="page-head"><h2>Настройки</h2></div>
+
+      <!-- Первая карточка — чем защищаемся. «Запрет» не требует сервера и не
+           тратит подписку, но помогает только там, где провайдер режет по
+           имени сайта: заблокированное по IP он не откроет. -->
       <div class="card settings-card">
-        <label class="field">
+        <div class="field">
+          <span>Защита</span>
+          <div class="themes" id="set-app-mode" role="radiogroup" aria-label="Защита">
+            <button type="button" class="theme mode-tile" data-mode-value="vpn" role="radio" aria-checked="true">
+              <span class="mode-tile-main">
+                <strong>VPN</strong>
+                <small>Весь трафик через сервер</small>
+              </span>
+            </button>
+            <button type="button" class="theme mode-tile" data-mode-value="zapret" role="radio" aria-checked="false">
+              <span class="mode-tile-main">
+                <strong>Запрет</strong>
+                <small>Обход без сервера, пинг родной</small>
+              </span>
+            </button>
+          </div>
+          <small class="field-hint" id="mode-hint">Сервер не нужен, подписка не тратится. Сайты, заблокированные по IP, «Запрет» не открывает — для них нужен VPN.</small>
+        </div>
+        <div class="card-row zapret-strategy-row" id="zapret-settings" hidden>
+          <span class="row-main">
+            <span class="row-title">Стратегия обхода</span>
+            <span class="row-sub" id="zapret-settings-sub">—</span>
+          </span>
+          <button type="button" class="btn btn-ghost" id="zapret-choose">Выбрать</button>
+          <button type="button" class="btn btn-primary" id="zapret-pick">Подобрать</button>
+        </div>
+      </div>
+
+      <div class="card settings-card">
+        <label class="field" id="field-connection-mode">
           <span>Режим подключения</span>
           <select id="set-mode">
             <option value="tun">TUN — весь трафик компьютера</option>
@@ -232,7 +280,7 @@
           <input type="checkbox" id="set-autoconnect">
           <span>Подключаться при запуске</span>
         </label>
-        <label class="switch">
+        <label class="switch" id="field-blockads">
           <input type="checkbox" id="set-blockads">
           <span>Блокировать рекламу и трекеры</span>
         </label>
@@ -240,7 +288,7 @@
           <input type="checkbox" id="set-tray">
           <span>Сворачивать в область уведомлений при закрытии окна</span>
         </label>
-        <div class="grid-2">
+        <div class="grid-2" id="field-dns">
           <label class="field"><span>DNS 1</span><input type="text" id="set-dns1" spellcheck="false"></label>
           <label class="field"><span>DNS 2</span><input type="text" id="set-dns2" spellcheck="false"></label>
         </div>
@@ -321,6 +369,28 @@
       <pre class="log" id="log-body">Журнал пуст.</pre>
     </section>
   </main>
+</div>
+
+<!-- Окно подбора. Открывается кнопками «Подобрать»/«Выбрать» и при первом
+     включении «Запрета», когда стратегия ни разу не подбиралась. -->
+<div class="modal" id="zapret-modal" hidden>
+  <div class="modal-box">
+    <div class="modal-head">
+      <h3 id="zapret-modal-title">Стратегия обхода</h3>
+      <button type="button" class="ub-close" id="zapret-close" aria-label="Закрыть">×</button>
+    </div>
+    <p class="modal-sub" id="zapret-modal-sub">Какая стратегия обойдёт блокировку, зависит от провайдера. Подбор поднимает каждую по очереди и проверяет YouTube и Discord.</p>
+    <div class="pick-progress" id="pick-progress" hidden>
+      <div class="bar"><i id="pick-bar"></i></div>
+      <span class="hint" id="pick-text">—</span>
+    </div>
+    <div class="list strategy-list" id="strategy-list"></div>
+    <div class="row row-end">
+      <button type="button" class="btn btn-ghost" id="pick-stop" hidden>Остановить</button>
+      <button type="button" class="btn btn-ghost" id="pick-start">Подобрать</button>
+      <button type="button" class="btn btn-primary" id="zapret-done">Готово</button>
+    </div>
+  </div>
 </div>
 
 <div class="toast" id="toast" hidden></div>

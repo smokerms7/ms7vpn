@@ -95,8 +95,16 @@ func build(output string, sources []string) error {
 		if err != nil {
 			return fmt.Errorf("%s: %w", source, err)
 		}
+		// Папка добавляется целиком, с сохранением путей внутри архива:
+		// файлы режима «Запрет» лежат в resources\zapret и должны попасть в
+		// программу той же папкой — winws ищет свои dll рядом с собой.
 		if info.IsDir() {
-			return fmt.Errorf("%s: это папка, нужен файл", source)
+			added, err := addTree(archive, source)
+			if err != nil {
+				return err
+			}
+			total += added
+			continue
 		}
 		header, err := zip.FileInfoHeader(info)
 		if err != nil {
@@ -138,4 +146,54 @@ func build(output string, sources []string) error {
 	fmt.Printf("  = %-34s %8.2f МБ (из %.2f МБ)\n",
 		strings.TrimPrefix(output, "./"), float64(packed.Size())/(1<<20), float64(total)/(1<<20))
 	return nil
+}
+
+// addTree кладёт в архив папку целиком.
+//
+// Имена записей — путь относительно текущей папки, как его передали в
+// командной строке: установщик распаковывает их как есть и проверяет, что
+// путь не уходит за пределы папки установки.
+func addTree(archive *zip.Writer, root string) (int64, error) {
+	if filepath.IsAbs(root) {
+		return 0, fmt.Errorf("%s: нужен путь относительно папки проекта", root)
+	}
+	var total int64
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		header, err := zip.FileInfoHeader(info)
+		if err != nil {
+			return err
+		}
+		header.Name = filepath.ToSlash(path)
+		header.Method = zip.Deflate
+		writer, err := archive.CreateHeader(header)
+		if err != nil {
+			return err
+		}
+		input, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		written, copyErr := io.Copy(writer, input)
+		closeErr := input.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		total += written
+		fmt.Printf("  + %-34s %8.2f МБ\n", header.Name, float64(written)/(1<<20))
+		return nil
+	})
+	return total, err
 }

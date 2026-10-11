@@ -48,6 +48,11 @@ type Subscription struct {
 }
 
 type Settings struct {
+	// Mode — чем защищаемся: обычным туннелем (vpn) или обходом DPI без
+	// сервера (zapret). Поле отдельное от ConnectionMode: тот выбирает
+	// способ завернуть трафик и к «Запрету» отношения не имеет.
+	Mode string `json:"mode"` // vpn | zapret
+
 	ConnectionMode string `json:"connectionMode"` // tun | system-proxy
 	AutoRefresh    bool   `json:"autoRefresh"`
 	AutoConnect    bool   `json:"autoConnect"`
@@ -95,6 +100,46 @@ type ConnectionState struct {
 	DownlinkBitsSec int64 `json:"downlinkBitsSec,omitempty"`
 }
 
+// ZapretState — состояние режима «Запрет» для окна.
+type ZapretState struct {
+	// Available — лежат ли рядом с программой файлы режима. На не-Windows и
+	// при вырезанном антивирусом бандле режим недоступен, и окно должно это
+	// показать, а не предлагать включение, которое всегда падает.
+	Available bool `json:"available"`
+
+	Running      bool      `json:"running"`
+	StrategyID   string    `json:"strategyId,omitempty"`
+	StrategyName string    `json:"strategyName,omitempty"`
+	StartedAt    time.Time `json:"startedAt,omitempty"`
+
+	// Picked — подбор хоть раз доходил до конца. По этому признаку главный
+	// экран решает, предлагать подбор при первом включении или просто
+	// включаться с сохранённой стратегией.
+	Picked bool `json:"picked"`
+
+	LastError string `json:"lastError,omitempty"`
+
+	// Pick — ход подбора. Пусто, когда подбор не запускался.
+	Pick PickState `json:"pick"`
+}
+
+// PickState — ход автоподбора стратегии.
+type PickState struct {
+	Running   bool   `json:"running"`
+	Index     int    `json:"index"`
+	Total     int    `json:"total"`
+	Current   string `json:"current,omitempty"`
+	CurrentID string `json:"currentId,omitempty"`
+	Done      bool   `json:"done"`
+	Found     string `json:"found,omitempty"`
+	FoundID   string `json:"foundId,omitempty"`
+
+	// Full — найденная стратегия открыла и YouTube, и Discord. Только в этом
+	// случае окно подбора закрывается само.
+	Full  bool   `json:"full"`
+	Error string `json:"error,omitempty"`
+}
+
 type AppState struct {
 	Version        string          `json:"version"`
 	Subscriptions  []Subscription  `json:"subscriptions"`
@@ -104,11 +149,13 @@ type AppState struct {
 	Settings       Settings        `json:"settings"`
 	Core           CoreState       `json:"core"`
 	Connection     ConnectionState `json:"connection"`
+	Zapret         ZapretState     `json:"zapret"`
 	RecentNodeIDs  []string        `json:"recentNodeIds,omitempty"`
 }
 
 func DefaultSettings() Settings {
 	return Settings{
+		Mode:           ModeVPN,
 		ConnectionMode: "system-proxy",
 		AutoRefresh:    true,
 		AutoConnect:    false,
@@ -122,6 +169,13 @@ func DefaultSettings() Settings {
 		Theme:          ThemeBrand,
 	}
 }
+
+// Чем защищаемся. «Запрет» не требует сервера и не тратит подписку, но
+// помогает только там, где провайдер режет по имени сайта.
+const (
+	ModeVPN    = "vpn"
+	ModeZapret = "zapret"
+)
 
 // Оформления окна. Пустое значение в старых файлах состояния означает
 // фирменное — так установки, сделанные до появления выбора, не меняют вид.

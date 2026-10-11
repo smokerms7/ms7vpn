@@ -127,6 +127,14 @@ func HiddenCommand(name string, args ...string) *exec.Cmd {
 func KillRunning() {
 	_ = HiddenCommand("taskkill", "/IM", AppName+".exe", "/F").Run()
 	_ = HiddenCommand("taskkill", "/IM", "xray.exe", "/F").Run()
+	// Режим «Запрет»: свой winws и служба его драйвера. Без этого WinDivert
+	// остаётся загруженным и держит файл WinDivert64.sys — распаковка поверх
+	// него и удаление папки заканчиваются ошибкой «файл занят».
+	//
+	// Бьём по своему имени файла: под именем winws.exe мы сняли бы обход,
+	// запущенный самим пользователем из другой программы.
+	_ = HiddenCommand("taskkill", "/IM", "shade-winws.exe", "/F").Run()
+	_ = HiddenCommand("sc", "stop", "WinDivert").Run()
 }
 
 // PreviousInstallDirs находит прежние установки, которые лежат не там, куда

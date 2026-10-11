@@ -272,6 +272,8 @@
 
     renderServers();
     renderHomeSubscription();
+    // После карточки подписки: в «Запрете» она не нужна и гасится здесь.
+    renderZapret();
     renderSubs();
     renderSettings();
     renderInfo();
@@ -516,6 +518,7 @@
     $('set-support').value = settings.supportUrl || '';
     $('set-update').value = settings.updateUrl || '';
     if (!themeTouched) applyTheme(settings.theme);
+    renderZapretSettings();
   }
 
   function renderInfo() {
@@ -535,7 +538,9 @@
 
   function updateTimer() {
     const connection = (state && state.connection) || {};
-    $('power-timer').textContent = connection.connected ? formatUptime(connection.startedAt) : '00:00:00';
+    const uptime = connection.connected ? formatUptime(connection.startedAt) : '00:00:00';
+    $('power-timer').textContent = uptime;
+    setText($('zapret-session'), uptime);
   }
 
   function updateWelcome() {
@@ -574,6 +579,7 @@
       const next = await api('/api/state');
       if (busy || !applyState(next, generation)) return;
       render();
+      followPick();
       if (AUTO_CONNECT && !autoConnectDone && !state.connection.connected && !state.connection.connecting) {
         autoConnectDone = true;
         connect(AUTO_CONNECT);
@@ -666,7 +672,18 @@
 
   $('power-btn').addEventListener('click', () => {
     if (!state) return;
-    if (state.connection.connected) disconnect(); else connect('');
+    if (state.connection.connected) { disconnect(); return; }
+    // Первое включение «Запрета», когда стратегия ни разу не подбиралась:
+    // включать наугад бессмысленно — у каждого провайдера работает своя.
+    // Поэтому открываем подбор и включаемся сами, если он нашёл стратегию,
+    // открывающую и YouTube, и Discord.
+    if (isZapret() && !(state.zapret || {}).picked && (state.zapret || {}).available) {
+      enableAfterPick = true;
+      openPage('settings');
+      openStrategyModal(true);
+      return;
+    }
+    connect('');
   });
 
   $('server-search').addEventListener('input', (event) => {
@@ -779,6 +796,7 @@
     state = await api('/api/settings', {
       method: 'POST',
       body: {
+        mode: appMode,
         connectionMode: $('set-mode').value,
         autoRefresh: $('set-autorefresh').checked,
         autoConnect: $('set-autoconnect').checked,
@@ -985,6 +1003,262 @@
     toast('Журнал очищен', 'ok');
   }));
   renderEvents();
+
+  /* ==================== режим «Запрет» ====================
+
+     Своего экрана у режима нет: он живёт на той же главной и той же кнопке.
+     Отличие в том, что показывать нечего — ни сервера, ни скорости: трафик
+     идёт напрямую, мимо нас, и считать его нам нечем. Вместо этого две
+     плитки: какая стратегия работает и сколько времени. */
+
+  let appMode = 'vpn';
+  // Включиться сразу после удачного подбора. Ставится только при первом
+  // нажатии «Включить»: в остальных случаях человек пришёл в подбор сам и
+  // решает сам.
+  let enableAfterPick = false;
+  let modalOpen = false;
+  let strategiesLoading = false;
+  let strategyCatalog = null;
+
+  const isZapret = () => appMode === 'zapret';
+
+  function renderZapret() {
+    const settings = state.settings || {};
+    appMode = settings.mode === 'zapret' ? 'zapret' : 'vpn';
+    const zapret = state.zapret || {};
+    const connection = state.connection || {};
+    const on = !!connection.connected;
+
+    $('home-title').hidden = !isZapret();
+    $('server-chip').hidden = isZapret();
+    $('speed-row').hidden = isZapret();
+    $('zapret-row').hidden = !isZapret();
+    if (isZapret()) {
+      $('home-sub-card').hidden = true;
+      setText($('zapret-strategy'), zapret.strategyName || '—');
+      setText($('power-label'), on ? 'ВЫКЛЮЧИТЬ' : connection.connecting ? 'ВКЛЮЧЕНИЕ…' : 'ВКЛЮЧИТЬ');
+      setText($('status-text'), on ? 'Включено' : connection.connecting ? 'Включение…' : 'Выключено');
+      $('home-stats').hidden = !on;
+      if (on) setText($('stat-mode'), 'Запрет — без сервера');
+    }
+    renderPickProgress();
+  }
+
+  // Карточки, которые в «Запрете» ничего не делают.
+  //
+  // Шифрованный DNS здесь не работает: DoH заворачивался в туннель правилом
+  // Xray, а в этом режиме Xray не запускается вообще. Написать «работает
+  // через DoH» было бы неправдой, поэтому карточка гасится с подписью.
+  const naFields = [
+    ['field-connection-mode', 'Только для VPN'],
+    ['field-dns', 'Только для TUN'],
+    ['field-blockads', 'Только для VPN']
+  ];
+
+  function renderZapretSettings() {
+    const zapret = state.zapret || {};
+    for (const button of $('set-app-mode').querySelectorAll('[data-mode-value]')) {
+      button.setAttribute('aria-checked', String(button.dataset.modeValue === appMode));
+    }
+    for (const [id, label] of naFields) {
+      const node = $(id);
+      if (!node) continue;
+      node.classList.toggle('is-na', isZapret());
+      let mark = node.querySelector('.na-mark');
+      if (isZapret()) {
+        if (!mark) {
+          mark = document.createElement('span');
+          mark.className = 'na-mark';
+          const target = node.querySelector('span') || node;
+          target.appendChild(mark);
+        }
+        setText(mark, '· ' + label);
+      } else if (mark) {
+        mark.remove();
+      }
+    }
+
+    // Подпись под плитками описывает выбранный режим, а не всегда «Запрет»:
+    // иначе в режиме VPN человек читал бы предупреждение про блокировки по IP,
+    // которые его в этот момент не касаются.
+    setText($('mode-hint'), isZapret()
+      ? 'Сервер не нужен, подписка не тратится. Сайты, заблокированные по IP, «Запрет» не открывает — для них нужен VPN.'
+      : 'Весь трафик идёт через выбранный сервер. Открывает всё, в том числе заблокированное по IP.');
+
+    $('zapret-settings').hidden = !isZapret();
+    if (!isZapret()) return;
+
+    const pick = zapret.pick || {};
+    if (!zapret.available) {
+      setText($('zapret-settings-sub'), 'Файлы режима не найдены рядом с программой — переустановите MS7VPN');
+      $('zapret-pick').disabled = true;
+      $('zapret-choose').disabled = true;
+      return;
+    }
+    $('zapret-pick').disabled = !!pick.running;
+    $('zapret-choose').disabled = false;
+    setText($('zapret-pick'), zapret.picked ? 'Подобрать заново' : 'Подобрать');
+    if (pick.running) {
+      setText($('zapret-settings-sub'), 'Подбор: ' + pick.index + ' из ' + pick.total + ' — ' + (pick.current || ''));
+      return;
+    }
+    const marks = describeResult(zapret.strategyId);
+    setText($('zapret-settings-sub'), (zapret.strategyName || '—') + (marks ? ' · ' + marks : ''));
+  }
+
+  // Что мы знаем про стратегию по итогам подбора.
+  function describeResult(id) {
+    if (!id || !strategyCatalog) return '';
+    const info = strategyCatalog.find((item) => item.id === id);
+    if (!info || !info.checked) return '';
+    return 'YouTube ' + (info.youtube ? '✓' : '✗') + ' · Discord ' + (info.discord ? '✓' : '✗');
+  }
+
+  /* ==== окно подбора и выбора ==== */
+
+  async function loadStrategies() {
+    if (strategiesLoading) return;
+    strategiesLoading = true;
+    try {
+      const data = await api('/api/zapret/strategies');
+      strategyCatalog = (data && data.strategies) || [];
+      renderStrategyList();
+    } catch (error) {
+      $('strategy-list').innerHTML = '<span class="events-empty">' + escapeHtml(error.message) + '</span>';
+    } finally {
+      strategiesLoading = false;
+    }
+  }
+
+  function renderStrategyList() {
+    const list = $('strategy-list');
+    if (!strategyCatalog) return;
+    const current = ((state && state.zapret) || {}).strategyId;
+    list.innerHTML = strategyCatalog.map((info) => {
+      const marks = info.checked
+        ? '<span class="mark ' + (info.youtube ? 'is-ok' : 'is-no') + '">YouTube ' + (info.youtube ? '✓' : '✗') + '</span>' +
+          '<span class="mark ' + (info.discord ? 'is-ok' : 'is-no') + '">Discord ' + (info.discord ? '✓' : '✗') + '</span>'
+        : '<span class="mark">не проверялась</span>';
+      return '<div class="strategy' + (info.id === current ? ' is-selected' : '') + '" data-strategy="' + escapeHtml(info.id) + '">' +
+        '<span class="strategy-name">' + escapeHtml(info.name) + '</span>' +
+        '<span class="strategy-marks">' + marks + '</span></div>';
+    }).join('');
+  }
+
+  function renderPickProgress() {
+    const zapret = (state && state.zapret) || {};
+    const pick = zapret.pick || {};
+    const box = $('pick-progress');
+    box.hidden = !pick.running && !pick.done;
+    if (pick.running) {
+      const percent = pick.total ? Math.round((pick.index / pick.total) * 100) : 0;
+      $('pick-bar').style.width = percent + '%';
+      setText($('pick-text'), 'Проверяю ' + pick.index + ' из ' + pick.total + ': ' + (pick.current || ''));
+    } else if (pick.done) {
+      $('pick-bar').style.width = '100%';
+      if (pick.error) {
+        setText($('pick-text'), pick.error);
+      } else if (pick.found) {
+        setText($('pick-text'), pick.full
+          ? 'Подошла стратегия «' + pick.found + '» — открылись и YouTube, и Discord'
+          : 'Лучшая из найденных: «' + pick.found + '». Полностью не помогла ни одна — выберите, что важнее');
+      }
+    }
+    $('pick-stop').hidden = !pick.running;
+    $('pick-start').disabled = !!pick.running;
+    setText($('pick-start'), zapret.picked ? 'Подобрать заново' : 'Подобрать');
+  }
+
+  function openStrategyModal(startPick) {
+    modalOpen = true;
+    $('zapret-modal').hidden = false;
+    loadStrategies();
+    renderPickProgress();
+    if (startPick) startAutoPick();
+  }
+
+  function closeStrategyModal() {
+    modalOpen = false;
+    enableAfterPick = false;
+    $('zapret-modal').hidden = true;
+  }
+
+  async function startAutoPick() {
+    await guard(async () => {
+      await api('/api/zapret/pick', { method: 'POST', body: {} });
+      state = await api('/api/state');
+      toast('Подбор начат: это займёт несколько минут', 'ok');
+    });
+  }
+
+  $('zapret-choose').addEventListener('click', () => openStrategyModal(false));
+  $('zapret-pick').addEventListener('click', () => openStrategyModal(true));
+  $('pick-start').addEventListener('click', () => startAutoPick());
+  $('zapret-close').addEventListener('click', closeStrategyModal);
+  $('zapret-done').addEventListener('click', closeStrategyModal);
+  $('zapret-modal').addEventListener('click', (event) => {
+    if (event.target === $('zapret-modal')) closeStrategyModal();
+  });
+
+  // «Остановить» обрывает подбор сразу: отмена идёт контекстом на стороне
+  // программы, winws снимается не дожидаясь конца текущей проверки.
+  $('pick-stop').addEventListener('click', () => guard(async () => {
+    await api('/api/zapret/pick/stop', { method: 'POST', body: {} });
+    state = await api('/api/state');
+    toast('Подбор остановлен', 'ok');
+  }));
+
+  // Строка выбирается кликом и сохраняется сразу. Если обход включён, он
+  // переподнимается с новой стратегией — это делает программа.
+  $('strategy-list').addEventListener('click', (event) => {
+    const row = event.target.closest('[data-strategy]');
+    if (!row) return;
+    guard(async () => {
+      state = await api('/api/zapret/select', { method: 'POST', body: { id: row.dataset.strategy } });
+      renderStrategyList();
+      toast('Стратегия выбрана', 'ok');
+    });
+  });
+
+  // Переключатель защиты. Сохраняется сразу, а не по «Сохранить»: смена
+  // режима на включённом соединении переподключает, и ждать отдельного
+  // нажатия здесь незачем.
+  $('set-app-mode').addEventListener('click', (event) => {
+    const button = event.target.closest('[data-mode-value]');
+    if (!button || button.dataset.modeValue === appMode) return;
+    appMode = button.dataset.modeValue;
+    renderZapretSettings();
+    guard(async () => {
+      state = await api('/api/settings', {
+        method: 'POST',
+        body: Object.assign({}, state.settings, { mode: appMode })
+      });
+      toast(isZapret() ? 'Включён режим «Запрет»' : 'Включён режим VPN', 'ok');
+    });
+  });
+
+  // Итог подбора: окно закрывается само и обход включается только если
+  // стратегия открыла обе группы сайтов. Помогла частично — окно остаётся,
+  // чтобы человек выбрал, что ему важнее.
+  let pickFollowed = false;
+
+  function followPick() {
+    if (!state) return;
+    const pick = (state.zapret || {}).pick || {};
+    if (!pick.done) {
+      pickFollowed = false;
+      return;
+    }
+    if (pickFollowed) return;
+    pickFollowed = true;
+    if (modalOpen) loadStrategies();
+    if (!enableAfterPick) return;
+    enableAfterPick = false;
+    if (pick.full && pick.foundId) {
+      closeStrategyModal();
+      connect('');
+    }
+  }
 
   /* ==================== запуск ==================== */
 

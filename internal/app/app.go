@@ -20,6 +20,7 @@ import (
 	"ms7vpn/internal/subscription"
 	"ms7vpn/internal/update"
 	"ms7vpn/internal/xray"
+	"ms7vpn/internal/zapret"
 )
 
 type APIError struct {
@@ -36,8 +37,14 @@ type App struct {
 	fetcher *subscription.Fetcher
 	core    *xray.Manager
 	dataDir string
-	done    chan struct{}
-	quit    sync.Once
+
+	// Режим «Запрет»: обход DPI без сервера. Своего состояния подключения у
+	// него нет — он пользуется тем же ConnectionState с Mode = zapret.
+	zapret *zapret.Manager
+	pick   pickRun
+
+	done chan struct{}
+	quit sync.Once
 
 	// Порты подбираются при подключении: 10808/10809 могут быть заняты
 	// соседним v2rayN или Nekoray.
@@ -110,6 +117,7 @@ func New(dataDir string) (*App, error) {
 		dataDir: dataDir, done: make(chan struct{}),
 	}
 	application.core = xray.NewManager(dataDir, application.onCoreProgress)
+	application.zapret = zapret.NewManager(dataDir)
 	application.state.Core.Version = xray.CoreVersion
 	application.state.Core.Installed = application.core.Installed()
 
@@ -118,6 +126,10 @@ func New(dataDir string) (*App, error) {
 	// остаться включённым, из-за чего интернет не работал вообще.
 	xray.KillOrphans(application.core.CorePath())
 	_ = RecoverSystemProxy(dataDir)
+	// То же и для «Запрета»: оставшийся winws продолжал бы портить пакеты, а
+	// служба драйвера — держать файл WinDivert64.sys, из-за чего ломаются
+	// обновление и удаление программы.
+	application.zapret.Cleanup()
 	return application, nil
 }
 
@@ -207,6 +219,7 @@ func (a *App) RegisterRoutes(mux *http.ServeMux, token string) {
 	mux.HandleFunc("/api/update/install", withAuth(a.handleInstallUpdate))
 	mux.HandleFunc("/api/update/progress", withAuth(a.handleUpdateProgress))
 	mux.HandleFunc("/api/quit", withAuth(a.handleQuit))
+	a.registerZapretRoutes(mux, withAuth)
 }
 
 func (a *App) handleState(w http.ResponseWriter, r *http.Request) {
@@ -219,10 +232,28 @@ func (a *App) handleState(w http.ResponseWriter, r *http.Request) {
 	// из-за этого весь интерфейс замирал на время подключения.
 	installed := a.core.Installed()
 	running := a.core.Running()
+	zapretState := a.zapretSnapshot()
 
 	a.mu.Lock()
 	a.state.Core.Installed = installed
-	dropped := a.state.Connection.Connected && !running
+	a.state.Zapret = zapretState
+	// В режиме «Запрет» живость проверяется по winws, а не по Xray: ядро в
+	// этом режиме не запускается вообще, и общая проверка ниже погасила бы
+	// работающий обход в первые же две секунды.
+	zapretMode := a.state.Connection.Mode == model.ModeZapret
+	zapretDropped := zapretMode && a.state.Connection.Connected && !zapretState.Running
+	if zapretDropped {
+		a.state.Connection.Connected = false
+		a.state.Connection.Connecting = false
+		a.state.Connection.StatusMessage = "Выключено"
+		// Причину winws объяснил при выходе — она уже разобрана менеджером.
+		a.state.Connection.LastError = zapretState.LastError
+		if a.state.Connection.LastError == "" {
+			a.state.Connection.LastError = "«Запрет» выключился. Откройте журнал для причины."
+		}
+		a.state.Zapret.LastError = a.state.Connection.LastError
+	}
+	dropped := !zapretMode && a.state.Connection.Connected && !running
 	if dropped {
 		a.state.Connection.Connected = false
 		a.state.Connection.Connecting = false
@@ -630,6 +661,16 @@ func (a *App) handleConnect(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) Connect(parent context.Context, nodeID, mode string) (model.AppState, error) {
+	// В режиме «Запрет» сервер не нужен, поэтому nodeID здесь не значит
+	// ничего: кнопка «Включить» на главной одна и та же, а расходятся режимы
+	// тут. Так интерфейсу не приходится знать, какой запрос куда отправлять.
+	a.mu.RLock()
+	appMode := a.state.Settings.Mode
+	a.mu.RUnlock()
+	if appMode == model.ModeZapret {
+		return a.EnableZapret(parent)
+	}
+
 	ctx, finish := a.beginConnect(parent)
 	defer finish()
 
@@ -952,6 +993,16 @@ func (a *App) handleDisconnect(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) Disconnect() (model.AppState, error) {
+	// «Запрет» выключается своим путём: процесс winws, служба драйвера, и
+	// ничего из того, что делает Disconnect для туннеля, — ни портов, ни
+	// системного прокси.
+	a.mu.RLock()
+	zapretMode := a.state.Settings.Mode == model.ModeZapret || a.state.Connection.Mode == model.ModeZapret
+	a.mu.RUnlock()
+	if zapretMode && a.zapret.Running() {
+		return a.DisableZapret()
+	}
+
 	a.logf("отключение")
 	a.abortConnect()
 	a.statsMu.Lock()
@@ -986,7 +1037,9 @@ func (a *App) handleSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	settings = normalizeSettings(settings)
 	a.mu.Lock()
-	if a.state.Connection.Connected && settings.ConnectionMode != a.state.Settings.ConnectionMode {
+	connected := a.state.Connection.Connected
+	modeChanged := settings.Mode != a.state.Settings.Mode
+	if connected && !modeChanged && settings.ConnectionMode != a.state.Settings.ConnectionMode {
 		a.mu.Unlock()
 		writeError(w, http.StatusConflict, &APIError{Code: "DISCONNECT_FIRST", Message: "Сначала отключите VPN, затем меняйте режим"})
 		return
@@ -995,6 +1048,28 @@ func (a *App) handleSettings(w http.ResponseWriter, r *http.Request) {
 	_ = a.store.Save(a.state)
 	state := a.state
 	a.mu.Unlock()
+
+	// Переключение VPN ⇄ «Запрет» на включённом соединении не требует
+	// «сначала отключите»: это разные способы сделать одно и то же, и человек
+	// переключает их, чтобы сравнить. Поднимаем новый режим сам.
+	if connected && modeChanged {
+		a.logf("смена режима на %s при включённом соединении — переподключаюсь", settings.Mode)
+		go func() {
+			if settings.Mode == model.ModeZapret {
+				_, _ = a.Disconnect()
+				if _, err := a.EnableZapret(context.Background()); err != nil {
+					a.logf("не удалось включить «Запрет» после смены режима: %v", err)
+				}
+				return
+			}
+			_, _ = a.DisableZapret()
+			if _, err := a.Connect(context.Background(), "", ""); err != nil {
+				a.logf("не удалось подключить VPN после смены режима: %v", err)
+			}
+		}()
+		state.Connection.Connecting = true
+		state.Connection.StatusMessage = "Переключаем режим…"
+	}
 	writeOK(w, state)
 }
 
@@ -1032,6 +1107,9 @@ func (a *App) handleLog(w http.ResponseWriter, r *http.Request) {
 	}
 	if coreLog := a.core.TailLog(100); coreLog != "" {
 		parts = append(parts, "=== Xray ===\n"+coreLog)
+	}
+	if zapretLog := a.zapret.LogTail(100); zapretLog != "" {
+		parts = append(parts, "=== Запрет (winws) ===\n"+zapretLog)
 	}
 	writeOK(w, map[string]any{"log": strings.Join(parts, "\n\n")})
 }
@@ -1136,6 +1214,11 @@ func (a *App) handleQuit(w http.ResponseWriter, r *http.Request) {
 func (a *App) Shutdown() {
 	a.quit.Do(func() {
 		_, _ = a.Disconnect()
+		// Чистим за «Запретом» всегда, а не только когда он был включён в
+		// этом сеансе: иначе служба WinDivert осталась бы загруженной и
+		// держала файл драйвера, из-за чего ломаются обновление и удаление.
+		a.pick.stop()
+		a.zapret.Cleanup()
 		close(a.done)
 	})
 }
@@ -1219,6 +1302,9 @@ func prependUnique(values []string, value string, limit int) []string {
 // результат в зависимости от того, откуда пришли настройки.
 func normalizeSettings(settings model.Settings) model.Settings {
 	defaults := model.DefaultSettings()
+	if settings.Mode != model.ModeVPN && settings.Mode != model.ModeZapret {
+		settings.Mode = defaults.Mode
+	}
 	if settings.ConnectionMode != "tun" && settings.ConnectionMode != "system-proxy" {
 		settings.ConnectionMode = defaults.ConnectionMode
 	}

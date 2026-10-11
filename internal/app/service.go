@@ -447,6 +447,16 @@ func (a *App) AutoConnectNodeID() string {
 	if !snapshot.Settings.AutoConnect {
 		return ""
 	}
+	// В режиме «Запрет» сервера нет, а включать всё равно нужно. Отдаём имя
+	// режима: Connect в этом режиме идентификатор не читает, зато окно по
+	// непустому значению понимает, что надо нажать «Включить» за человека.
+	// Подбор при автозапуске не трогаем — берём сохранённую стратегию.
+	if snapshot.Settings.Mode == model.ModeZapret {
+		if !a.zapret.Available() {
+			return ""
+		}
+		return model.ModeZapret
+	}
 	if snapshot.SelectedNodeID == "" {
 		return ""
 	}

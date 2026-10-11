@@ -94,9 +94,17 @@ func watchState(app *ms7app.App, icon *tray.Tray, stop <-chan struct{}) {
 		if !first {
 			switch {
 			case current.Connected && !previous.Connected:
-				icon.Notify("MS7VPN подключён", connectionSummary(current))
+				if current.Mode == model.ModeZapret {
+					icon.Notify("«Запрет» включён", connectionSummary(current))
+				} else {
+					icon.Notify("MS7VPN подключён", connectionSummary(current))
+				}
 			case !current.Connected && previous.Connected:
-				icon.Notify("MS7VPN отключён", "Трафик снова идёт напрямую")
+				if previous.Mode == model.ModeZapret {
+					icon.Notify("«Запрет» выключён", "Обход блокировок больше не работает")
+				} else {
+					icon.Notify("MS7VPN отключён", "Трафик снова идёт напрямую")
+				}
 			case current.LastError != "" && current.LastError != previous.LastError:
 				icon.Notify("Не удалось подключиться", current.LastError)
 			}
@@ -118,7 +126,12 @@ func trayState(connection model.ConnectionState) tray.State {
 }
 
 func trayTooltip(connection model.ConnectionState) string {
+	zapret := connection.Mode == model.ModeZapret
 	switch {
+	case connection.Connected && zapret:
+		return fmt.Sprintf("MS7VPN — Запрет, %s\n%s", connection.NodeName, uptimeText(connection.StartedAt))
+	case connection.Connecting && zapret:
+		return "MS7VPN — включение «Запрета»…"
 	case connection.Connected:
 		return fmt.Sprintf("MS7VPN — %s\n%s", connection.NodeName, uptimeText(connection.StartedAt))
 	case connection.Connecting:
@@ -129,6 +142,11 @@ func trayTooltip(connection model.ConnectionState) string {
 }
 
 func connectionSummary(connection model.ConnectionState) string {
+	// В «Запрете» сервера нет: в NodeName лежит название стратегии, а режим
+	// описывается тем, чего в нём нет, — туннеля.
+	if connection.Mode == model.ModeZapret {
+		return fmt.Sprintf("Стратегия %s · без сервера, пинг родной", connection.NodeName)
+	}
 	mode := "системный прокси"
 	if connection.Mode == "tun" {
 		mode = "TUN, весь трафик"

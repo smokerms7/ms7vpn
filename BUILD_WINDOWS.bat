@@ -29,7 +29,10 @@ rem Только то, что нужно при первом запуске. geo
 rem не кладём: маршрутизация работает на явных подсетях, а geosite.dat нужен
 rem лишь для блокировки рекламы. Кто её включит - тому хватит полной версии
 rem или отдельной загрузки.
-set LEAN=dist\MS7VPN.exe bundle\xray.exe bundle\wintun.dll dist\uninstaller.exe
+rem resources\zapret — файлы режима «Запрет»: winws, драйвер WinDivert,
+rem стратегии и списки. Кладутся папкой целиком: winws собран под cygwin и
+rem ищет свои dll рядом с собой.
+set LEAN=dist\MS7VPN.exe bundle\xray.exe bundle\wintun.dll dist\uninstaller.exe resources\zapret
 go run .\cmd\mkpayload -o dist\MS7VPN-payload.zip %LEAN%
 if errorlevel 1 exit /b 1
 
