@@ -2,7 +2,7 @@ package model
 
 import "time"
 
-const AppVersion = "ms7.vs2.2"
+const AppVersion = "ms7.vs2.3"
 
 type UserInfo struct {
 	UploadBytes   int64 `json:"uploadBytes,omitempty"`
