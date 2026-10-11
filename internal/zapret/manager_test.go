@@ -113,29 +113,62 @@ func TestSelectedFallsBackToFirst(t *testing.T) {
 	}
 }
 
-// Короткий ответ — это не «открылось».
+// Что считается «открылось».
 //
-// ТСПУ пропускает начало соединения и замораживает его потом, поэтому
-// проверка мерит объём. Тест держит оба случая: полный ответ и обрезанный.
-func TestFetchEnoughCountsBytes(t *testing.T) {
-	full := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write(make([]byte, minProbeBytes+1024))
+// Не код ответа и не объём сам по себе, а дочитанное тело: ТСПУ пропускает
+// начало соединения и замораживает его потом. Короткий, но целый ответ —
+// это успех: gateway.discord.gg в обычной жизни отвечает пустым 404, а
+// hqdefault.jpg весит 16 КБ, и порог в 24 КБ забраковал бы их оба.
+func TestFetchEnoughAcceptsCompleteAnswers(t *testing.T) {
+	big := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(make([]byte, minProbeBytes+4096))
 	}))
-	defer full.Close()
-	short := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write(make([]byte, 2048))
+	defer big.Close()
+	small := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(make([]byte, 1500))
 	}))
-	defer short.Close()
+	defer small.Close()
+	notFound := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer notFound.Close()
+	broken := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer broken.Close()
 
 	client := directClient()
-	if err := fetchEnough(context.Background(), client, full.URL); err != nil {
-		t.Errorf("полный ответ не принят: %v", err)
+	for name, server := range map[string]*httptest.Server{
+		"большой ответ": big, "короткий ответ": small, "пустой 404": notFound,
+	} {
+		if err := fetchEnough(context.Background(), client, server.URL); err != nil {
+			t.Errorf("%s не принят: %v", name, err)
+		}
 	}
-	err := fetchEnough(context.Background(), client, short.URL)
+	if err := fetchEnough(context.Background(), client, broken.URL); err == nil {
+		t.Error("ответ 500 принят за рабочий")
+	}
+}
+
+// Оборванное на середине соединение — главный признак того, что стратегия не
+// сработала: сервер обещал тело, а оно не пришло.
+func TestFetchEnoughRejectsCutConnection(t *testing.T) {
+	cut := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", "100000")
+		_, _ = w.Write(make([]byte, 1024))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		// Обработчик уходит, тело остаётся недописанным — клиент увидит
+		// неожиданный конец потока, как при вмешательстве DPI.
+	}))
+	defer cut.Close()
+
+	err := fetchEnough(context.Background(), directClient(), cut.URL)
 	if err == nil {
-		t.Fatal("обрезанный ответ принят за рабочий")
+		t.Fatal("оборванный ответ принят за рабочий")
 	}
-	if !strings.Contains(err.Error(), "заморожено") {
+	if !strings.Contains(err.Error(), "оборвалось") {
 		t.Errorf("непонятное объяснение: %v", err)
 	}
 }

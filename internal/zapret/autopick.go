@@ -22,6 +22,11 @@ type Progress struct {
 	FoundID   string `json:"foundId,omitempty"`
 	Error     string `json:"error,omitempty"`
 
+	// StepError — почему сорвался отдельный шаг. В окне не показывается:
+	// одна неудачная стратегия подбор не останавливает. Но в журнал попасть
+	// должна, иначе «не запустилась» и «не помогла» выглядят одинаково.
+	StepError string `json:"-"`
+
 	// Full отмечает, что найденная стратегия открыла и YouTube, и Discord.
 	// Главный экран по этому признаку решает, закрывать окно подбора и
 	// включаться сразу или оставить человека выбирать, что ему важнее.
@@ -75,6 +80,9 @@ func (m *Manager) AutoPick(ctx context.Context, onStep func(Progress)) (Strategy
 			// Неудачный запуск — это не приговор всему подбору: одна
 			// стратегия может ссылаться на файл, которого нет в бандле.
 			m.RememberResult(strategy.ID, GroupResult{})
+			onStep(Progress{Running: true, Index: index + 1, Total: len(list),
+				Current: strategy.Name, CurrentID: strategy.ID,
+				StepError: strategy.ID + ": " + err.Error()})
 			continue
 		}
 		select {

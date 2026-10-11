@@ -276,6 +276,9 @@ func (a *App) runPick(ctx context.Context, cancel context.CancelFunc) {
 	a.logf("Запрет: начат подбор стратегии")
 
 	strategy, probe, err := a.zapret.AutoPick(ctx, func(progress zapret.Progress) {
+		if progress.StepError != "" {
+			a.logf("Запрет: стратегия не запустилась — %s", progress.StepError)
+		}
 		a.pick.set(model.PickState{
 			Running: progress.Running, Index: progress.Index, Total: progress.Total,
 			Current: progress.Current, CurrentID: progress.CurrentID,
