@@ -9,38 +9,6 @@
 <body>
 
 <!-- Первый запуск: пока нет ни одной подписки -->
-<div class="welcome" id="welcome" hidden>
-  <div class="welcome-box">
-    <img src="logo.png" alt="" class="welcome-logo">
-    <h1>Добро пожаловать в <span>MS7 VPN</span></h1>
-    <p class="welcome-sub">Вставьте свою ссылку-подписку из бота — приложение загрузит серверы и защитит весь трафик.</p>
-
-    <button type="button" class="welcome-action" data-bot="free">
-      <span class="welcome-icon">🎁</span>
-      <span class="welcome-action-text">
-        <strong>Бесплатная подписка</strong>
-        <small>Получить в Telegram-боте</small>
-      </span>
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18l6-6-6-6"/></svg>
-    </button>
-
-    <button type="button" class="welcome-action is-vip" data-bot="buy">
-      <span class="welcome-icon">👑</span>
-      <span class="welcome-action-text">
-        <strong>Купить подписку</strong>
-        <small>Тарифы и оплата в боте</small>
-      </span>
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18l6-6-6-6"/></svg>
-    </button>
-
-    <div class="welcome-divider"><span>или вставьте ссылку вручную</span></div>
-
-    <input type="text" id="welcome-url" placeholder="https://sub.ms7pc.shop/..." spellcheck="false">
-    <button type="button" class="btn btn-primary btn-wide" id="welcome-add">Загрузить подписку</button>
-    <p class="welcome-hint">Ссылка есть в боте: «👤 Моя подписка» → «🔗 Ссылка и QR-код».</p>
-  </div>
-</div>
-
 <div class="shell" id="shell">
 
   <aside class="sidebar">
@@ -187,6 +155,9 @@
       <input type="search" class="search" id="server-search" placeholder="Поиск по названию">
       <div class="list" id="server-list"></div>
       <p class="empty" id="servers-empty">Серверы появятся после добавления подписки.</p>
+      <div class="empty-action" id="servers-add-sub" hidden>
+        <button type="button" class="btn btn-primary">Добавить подписку</button>
+      </div>
     </section>
 
     <section class="page" id="page-subs">

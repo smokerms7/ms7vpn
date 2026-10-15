@@ -277,7 +277,6 @@
     renderSubs();
     renderSettings();
     renderInfo();
-    updateWelcome();
     updateTimer();
   }
 
@@ -346,6 +345,9 @@
     });
 
     $('servers-empty').hidden = visible.length > 0;
+    // Кнопку показываем только когда подписок нет вовсе. Если серверы просто
+    // не нашлись поиском — добавлять нечего, предлагать нечего.
+    $('servers-add-sub').hidden = (state.subscriptions || []).length > 0;
 
     const seen = new Set();
     let position = list.firstElementChild;
@@ -543,11 +545,14 @@
     setText($('zapret-session'), uptime);
   }
 
-  function updateWelcome() {
-    const hasSubs = (state.subscriptions || []).length > 0;
-    $('welcome').hidden = hasSubs;
-    $('shell').hidden = !hasSubs;
-  }
+  // Приложение открывается сразу, даже когда подписок нет.
+  //
+  // Раньше здесь был отдельный экран «добавьте подписку», который прятал
+  // всё окно целиком. Пока VPN был единственным режимом, это было разумно.
+  // С появлением «Запрета» стало мешать: он подписки не требует, а человек,
+  // пришедший именно за ним, упирался в требование, которое к нему не
+  // относится. Ссылку можно добавить позже на вкладке «Подписки» — там есть
+  // и поле, и кнопки бота.
 
   async function openExternal(url) {
     try {
@@ -562,7 +567,6 @@
     await guard(async () => {
       state = await api('/api/subscriptions/add', { method: 'POST', body: { url, name: '' } });
       $('sub-url').value = '';
-      $('welcome-url').value = '';
       toast('Подписка добавлена', 'ok');
     });
   }
@@ -673,6 +677,13 @@
   $('power-btn').addEventListener('click', () => {
     if (!state) return;
     if (state.connection.connected) { disconnect(); return; }
+    // Режим VPN без единой подписки подключать не к чему. Раньше запрос
+    // уходил на сервер и возвращался технической ошибкой.
+    if (!isZapret() && (state.subscriptions || []).length === 0) {
+      toast('Сначала добавьте подписку', 'err');
+      openPage('subs');
+      return;
+    }
     // Первое включение «Запрета», когда стратегия ни разу не подбиралась:
     // включать наугад бессмысленно — у каждого провайдера работает своя.
     // Поэтому открываем подбор и включаемся сами, если он нашёл стратегию,
@@ -685,6 +696,8 @@
     }
     connect('');
   });
+
+  $('servers-add-sub').addEventListener('click', () => openPage('subs'));
 
   $('server-search').addEventListener('input', (event) => {
     search = event.target.value;
@@ -740,10 +753,6 @@
   }));
 
   $('sub-add').addEventListener('click', () => addSubscription($('sub-url').value.trim()));
-  $('welcome-add').addEventListener('click', () => addSubscription($('welcome-url').value.trim()));
-  $('welcome-url').addEventListener('keydown', (event) => {
-    if (event.key === 'Enter') $('welcome-add').click();
-  });
 
   document.querySelectorAll('[data-bot]').forEach((button) => {
     button.addEventListener('click', () => openExternal(BOT_URL));
