@@ -42,6 +42,26 @@ func TestCoreSelectionMigration(t *testing.T) {
 	}
 }
 
+func TestProxyPortsKeepExistingApplicationSettings(t *testing.T) {
+	httpPort, socksPort := proxyPorts(func(preferred int) int { return preferred })
+	if httpPort != 10809 || socksPort != 10808 {
+		t.Fatalf("legacy HTTP/SOCKS endpoints changed: %d/%d", httpPort, socksPort)
+	}
+}
+
+func TestProxyPortsAvoidCollisionWhenLegacySOCKSPortIsBusy(t *testing.T) {
+	occupied := map[int]bool{10808: true}
+	httpPort, socksPort := proxyPorts(func(preferred int) int {
+		for occupied[preferred] {
+			preferred++
+		}
+		return preferred
+	})
+	if httpPort != 10809 || socksPort != 10810 || httpPort == socksPort {
+		t.Fatalf("occupied SOCKS port collided with HTTP: %d/%d", httpPort, socksPort)
+	}
+}
+
 func TestCoreChangeDuringConnectionRejected(t *testing.T) {
 	app := newTestApp(t)
 	app.state.Connection.Connecting = true

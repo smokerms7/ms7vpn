@@ -418,7 +418,7 @@ func (w *Window) createControls() {
 	w.addButton(idSaveSettings, "Сохранить", 220, 230, 160, 42, pageSettings)
 	w.addButton(idOpenData, "Папка данных", 390, 230, 170, 42, pageSettings)
 	w.addButton(idSupport, "Техподдержка", 570, 230, 170, 42, pageSettings)
-	w.addStatic(5103, "TUN доступен для обоих ядер и требует прав администратора.\nВ варианте Xray сетевым адаптером управляет sing-box. Перед подключением отключите другие VPN.", 220, 310, 800, 90, pageSettings, false)
+	w.addStatic(5103, "TUN доступен для обоих ядер и требует прав администратора.\nПри подключении MS7VPN закрывает Happ и другие поддерживаемые VPN-клиенты. Для остановки повышенных процессов потребуются права администратора.", 220, 310, 800, 90, pageSettings, false)
 	w.addStatic(5104, "Ядра загружаются из официальных релизов с проверкой SHA-256. Для TUN проверяются маршруты и запрос с адреса адаптера MS7VPN.", 220, 430, 800, 75, pageSettings, false)
 
 	// Logs.

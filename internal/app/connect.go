@@ -64,29 +64,7 @@ func (a *App) Connect(parent context.Context, nodeID, mode string) (model.AppSta
 			return a.Snapshot(), &APIError{Code: "NODE_UNSUPPORTED", Message: err.Error()}
 		}
 	}
-	var iface, serverIP string
-	if mode == "tun" {
-		checkCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		var err error
-		iface, err = tunEnvironment(checkCtx)
-		cancel()
-		if err != nil {
-			return a.Snapshot(), &APIError{Code: "TUN_NETWORK_CONFLICT", Message: err.Error()}
-		}
-		if settings.Engine == "xray" {
-			if ip := net.ParseIP(node.Address); ip != nil {
-				serverIP = ip.String()
-			} else {
-				resolveCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
-				ips, err := net.DefaultResolver.LookupIP(resolveCtx, "ip4", node.Address)
-				cancel()
-				if err != nil || len(ips) == 0 {
-					return a.Snapshot(), &APIError{Code: "SERVER_DNS_FAILED", Message: "Не удалось разрешить адрес VPN-сервера до запуска TUN"}
-				}
-				serverIP = ips[0].String()
-			}
-		}
-	}
+
 	if err := a.stopVPN(); err != nil {
 		return a.Snapshot(), err
 	}
@@ -100,8 +78,9 @@ func (a *App) Connect(parent context.Context, nodeID, mode string) (model.AppSta
 	a.state.Connection = model.ConnectionState{Connecting: true, NodeID: node.ID, NodeName: node.Name, Mode: mode, Engine: settings.Engine, StatusMessage: "Подготовка ядра VPN…"}
 	a.mu.Unlock()
 	a.logf("подключение: сервер %q, ядро %s, режим %s", node.Name, settings.Engine, mode)
+	boxStarted := false
 	fail := func(err error) (model.AppState, error) {
-		if settings.Engine == "sing-box" && strings.Contains(a.box.TailLog(20), "reality verification failed") {
+		if settings.Engine == "sing-box" && boxStarted && strings.Contains(a.box.TailLog(20), "reality verification failed") {
 			err = fmt.Errorf("sing-box не прошёл проверку REALITY этого сервера. Выберите ядро Xray или сервер TLS/Hysteria2. Проверка подлинности не отключалась: %w", err)
 		}
 		a.logf("ОШИБКА подключения: %v", err)
@@ -113,16 +92,71 @@ func (a *App) Connect(parent context.Context, nodeID, mode string) (model.AppSta
 		a.mu.Unlock()
 		return state, &APIError{Code: "CONNECT_FAILED", Message: err.Error()}
 	}
+	// Fetch required cores while the previous VPN still provides connectivity.
+	ensureCtx, ensureCancel := context.WithTimeout(ctx, 9*time.Minute)
+	var ensureErr error
+	if settings.Engine == "xray" {
+		ensureErr = a.core.Ensure(ensureCtx)
+	}
+	if ensureErr == nil && (settings.Engine == "sing-box" || mode == "tun") {
+		ensureErr = a.box.Ensure(ensureCtx)
+	}
+	ensureCancel()
+	if ensureErr != nil {
+		return fail(ensureErr)
+	}
+	conflictCtx, conflictCancel := context.WithTimeout(ctx, 30*time.Second)
+	stoppedVPNs, conflictErr := stopConflictingVPNs(conflictCtx, []string{a.core.CorePath(), a.box.CorePath()})
+	conflictCancel()
+	if len(stoppedVPNs) > 0 {
+		a.logf("отключены другие VPN: %s", strings.Join(stoppedVPNs, ", "))
+	}
+	if conflictErr != nil {
+		state, err := fail(conflictErr)
+		if errors.Is(conflictErr, errVPNConflictNeedsAdmin) {
+			err.(*APIError).Code = "NEED_ADMIN"
+		}
+		return state, err
+	}
+	var iface, serverIP string
+	if mode == "tun" {
+		checkCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		var err error
+		iface, err = tunEnvironment(checkCtx)
+		cancel()
+		if err != nil {
+			return fail(err)
+		}
+		if settings.Engine == "xray" {
+			if ip := net.ParseIP(node.Address); ip != nil {
+				serverIP = ip.String()
+			} else {
+				resolveCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+				ips, err := net.DefaultResolver.LookupIP(resolveCtx, "ip4", node.Address)
+				cancel()
+				if err != nil || len(ips) == 0 {
+					return fail(errors.New("Не удалось разрешить адрес VPN-сервера до запуска TUN"))
+				}
+				serverIP = ips[0].String()
+			}
+		}
+	}
 	if err := ctx.Err(); err != nil {
 		return fail(err)
 	}
-	httpPort := xray.FreeLocalPort(10809)
-	socksPort := xray.FreeLocalPort(httpPort + 1)
+	httpPort, socksPort := proxyPorts(xray.FreeLocalPort)
+	a.logf("локальные порты: HTTP=%d, SOCKS5=%d", httpPort, socksPort)
 	apiPort := xray.FreeLocalPort(10085)
 	if apiPort == httpPort || apiPort == socksPort {
 		apiPort = xray.FreeLocalPort(socksPort + 1)
 	}
 	var warnings []string
+	if len(stoppedVPNs) > 0 {
+		warnings = append(warnings, "Отключены другие VPN: "+strings.Join(stoppedVPNs, ", "))
+	}
+	if mode == "system-proxy" && (httpPort != 10809 || socksPort != 10808) {
+		warnings = append(warnings, fmt.Sprintf("Стандартные порты заняты. HTTP: 127.0.0.1:%d; SOCKS5: 127.0.0.1:%d. Если в приложении задан прокси вручную, укажите этот порт.", httpPort, socksPort))
+	}
 	if settings.Engine == "xray" {
 		ensureCtx, cancel := context.WithTimeout(ctx, 9*time.Minute)
 		err := a.core.Ensure(ensureCtx)
@@ -134,7 +168,7 @@ func (a *App) Connect(parent context.Context, nodeID, mode string) (model.AppSta
 		if err != nil {
 			return fail(err)
 		}
-		warnings = built.Warnings
+		warnings = append(warnings, built.Warnings...)
 		if err := ctx.Err(); err != nil {
 			return fail(err)
 		}
@@ -182,6 +216,7 @@ func (a *App) Connect(parent context.Context, nodeID, mode string) (model.AppSta
 		if err := a.box.Start(ctx, config); err != nil {
 			return fail(err)
 		}
+		boxStarted = true
 		if err := a.box.WaitAlive(ctx); err != nil {
 			return fail(err)
 		}
@@ -234,6 +269,17 @@ func (a *App) Connect(parent context.Context, nodeID, mode string) (model.AppSta
 	}
 	a.logf("подключено: %s (%s, %s)", node.Name, settings.Engine, mode)
 	return state, nil
+}
+
+// Preserve the ports used before the dual-core update. Applications can have
+// a manually configured SOCKS endpoint even when browsers use Windows proxy.
+func proxyPorts(available func(int) int) (httpPort, socksPort int) {
+	httpPort = available(10809)
+	socksPort = available(10808)
+	if socksPort == httpPort {
+		socksPort = available(httpPort + 1)
+	}
+	return
 }
 
 func (a *App) waitTunReady(ctx context.Context, testURL string) error {
