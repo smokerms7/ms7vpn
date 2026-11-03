@@ -1,5 +1,6 @@
 # Сборочные артефакты
 dist/
+.local-check/
 cmd/installer/payload/payload.zip
 cmd/installer/payload/*.sha256
 

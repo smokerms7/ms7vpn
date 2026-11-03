@@ -10,6 +10,7 @@ package setup
 
 import (
 	"fmt"
+	"ms7vpn/internal/xray"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,7 +24,7 @@ import (
 
 const (
 	AppName     = "MS7VPN"
-	AppVersion  = "ms7.vs2.1"
+	AppVersion  = "ms7.vs2.5"
 	Publisher   = "MS7 VPN"
 	RegistryKey = `Software\Microsoft\Windows\CurrentVersion\Uninstall\MS7VPN`
 )
@@ -126,7 +127,11 @@ func HiddenCommand(name string, args ...string) *exec.Cmd {
 // Раньше taskkill запускался без скрытия окна и моргал консолью.
 func KillRunning() {
 	_ = HiddenCommand("taskkill", "/IM", AppName+".exe", "/F").Run()
-	_ = HiddenCommand("taskkill", "/IM", "xray.exe", "/F").Run()
+	// Never kill Happ/v2rayN cores by image name during an MS7VPN update.
+	if dir, err := InstallDir(); err == nil {
+		xray.KillOrphans(filepath.Join(dir, "xray.exe"))
+		xray.KillOrphans(filepath.Join(dir, "sing-box.exe"))
+	}
 	// Режим «Запрет»: свой winws и служба его драйвера. Без этого WinDivert
 	// остаётся загруженным и держит файл WinDivert64.sys — распаковка поверх
 	// него и удаление папки заканчиваются ошибкой «файл занят».

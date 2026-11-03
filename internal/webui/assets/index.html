@@ -218,6 +218,14 @@
       </div>
 
       <div class="card settings-card">
+        <label class="field" id="field-engine">
+          <span>Ядро VPN</span>
+          <select id="set-engine">
+            <option value="xray">Xray — включая XHTTP и mKCP</option>
+            <option value="sing-box">sing-box — включая Hysteria2</option>
+          </select>
+          <small class="field-hint">Оба ядра поддерживают TUN и системный прокси. Для XHTTP и новых REALITY-серверов выбирайте Xray. Перед сменой ядра отключите VPN.</small>
+        </label>
         <label class="field" id="field-connection-mode">
           <span>Режим подключения</span>
           <select id="set-mode">
@@ -295,7 +303,7 @@
 
       <div class="card info-list">
         <div class="info-row"><span>Версия приложения</span><b id="info-version">—</b></div>
-        <div class="info-row"><span>Ядро Xray</span><b id="info-core">—</b></div>
+        <div class="info-row"><span>Выбранное ядро</span><b id="info-core">—</b></div>
         <div class="info-row"><span>Устройство</span><b id="info-device">—</b></div>
         <div class="info-row"><span>Система</span><b id="info-os">—</b></div>
         <div class="info-row"><span>Идентификатор устройства</span>

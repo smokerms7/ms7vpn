@@ -97,7 +97,7 @@ func KillOrphans(corePath string) int {
 	killed := 0
 	for err = windows.Process32First(snapshot, &entry); err == nil; err = windows.Process32Next(snapshot, &entry) {
 		name := strings.ToLower(windows.UTF16ToString(entry.ExeFile[:]))
-		if name != "xray.exe" || entry.ProcessID == self {
+		if name != strings.ToLower(filepath.Base(corePath)) || entry.ProcessID == self {
 			continue
 		}
 		handle, openErr := windows.OpenProcess(

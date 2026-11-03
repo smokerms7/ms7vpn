@@ -335,7 +335,7 @@ func (a *App) PingNodes(ctx context.Context, subscriptionID string, nodeIDs []st
 func (a *App) SaveSettings(settings model.Settings) (model.AppState, error) {
 	settings = normalizeSettings(settings)
 	a.mu.Lock()
-	if a.state.Connection.Connected && settings.ConnectionMode != a.state.Settings.ConnectionMode {
+	if (a.state.Connection.Connected || a.state.Connection.Connecting) && (settings.ConnectionMode != a.state.Settings.ConnectionMode || settings.Engine != a.state.Settings.Engine || settings.Mode != a.state.Settings.Mode) {
 		a.mu.Unlock()
 		return a.Snapshot(), &APIError{Code: "DISCONNECT_FIRST", Message: "Сначала отключите VPN, затем меняйте режим"}
 	}
@@ -349,7 +349,9 @@ func (a *App) SaveSettings(settings model.Settings) (model.AppState, error) {
 	return state, nil
 }
 
-func (a *App) CoreLog(lines int) string { return a.core.TailLog(lines) }
+func (a *App) CoreLog(lines int) string {
+	return a.core.TailLog(lines) + "\n=== sing-box ===\n" + a.box.TailLog(lines)
+}
 
 // StartBackgroundTasks запускает фоновое обновление подписок.
 //

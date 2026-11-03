@@ -510,6 +510,7 @@
     const settings = state.settings || {};
     if (document.activeElement && document.activeElement.closest && document.activeElement.closest('#page-settings')) return;
     $('set-mode').value = settings.connectionMode || 'tun';
+    $('set-engine').value = settings.engine || 'xray';
     $('set-autorefresh').checked = !!settings.autoRefresh;
     $('set-autoconnect').checked = !!settings.autoConnect;
     $('set-blockads').checked = !!settings.blockAds;
@@ -529,10 +530,10 @@
       setText($('update-sub'), 'Установлена версия ' + (state.version || '—'));
     }
     $('info-version').textContent = state.version || '—';
-    $('info-core').textContent = core.version || '—';
+    $('info-core').textContent = `${core.engine === 'sing-box' ? 'sing-box' : 'Xray'} ${core.version || ''}`;
     $('info-core-state').textContent = core.downloading
       ? `Загрузка ядра… ${core.progress || 0}%`
-      : core.installed ? 'Ядро Xray установлено' : 'Ядро загрузится при первом подключении';
+      : core.installed ? 'Выбранное ядро установлено' : 'Ядро загрузится при первом подключении';
     $('info-device').textContent = (device && device.deviceName) || '—';
     $('info-os').textContent = (device && device.osName) || 'Windows';
     $('info-id').textContent = (device && device.deviceId) || '—';
@@ -807,6 +808,7 @@
       body: {
         mode: appMode,
         connectionMode: $('set-mode').value,
+        engine: $('set-engine').value,
         autoRefresh: $('set-autorefresh').checked,
         autoConnect: $('set-autoconnect').checked,
         // Раньше здесь жёстко стояло false, поэтому галочка блокировки
@@ -1059,6 +1061,7 @@
   // Xray, а в этом режиме Xray не запускается вообще. Написать «работает
   // через DoH» было бы неправдой, поэтому карточка гасится с подписью.
   const naFields = [
+    ['field-engine', 'Только для VPN'],
     ['field-connection-mode', 'Только для VPN'],
     ['field-dns', 'Только для TUN'],
     ['field-blockads', 'Только для VPN']

@@ -56,8 +56,28 @@ func TestVLESSRealityConfig(t *testing.T) {
 	}
 }
 
-func TestXHTTPAndTunConfig(t *testing.T) {
-	config := configFor(t, "vless://"+uuid+"@be.example.com:443?encryption=none&security=tls&sni=be.example.com&type=xhttp&host=be.example.com&path=%2Fms7&mode=auto#BE", "tun")
+func TestXrayTUNBackendPinsServerAndPhysicalInterface(t *testing.T) {
+	raw, err := BuildConfig(mustNode(t), ConfigOptions{Mode: "system-proxy", BindInterface: "Ethernet", ServerIP: "192.0.2.9"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var c map[string]any
+	json.Unmarshal(raw, &c)
+	out := proxyOutbound(c)
+	if got := out["streamSettings"].(map[string]any)["sockopt"].(map[string]any)["interface"]; got != "Ethernet" {
+		t.Fatal("Xray sockets can loop into TUN")
+	}
+	server := out["settings"].(map[string]any)["vnext"].([]any)[0].(map[string]any)
+	if server["address"] != "192.0.2.9" {
+		t.Fatal("server DNS can recurse through TUN")
+	}
+	if _, err := BuildConfig(mustNode(t), ConfigOptions{Mode: "tun"}); err == nil {
+		t.Fatal("unsupported standalone Xray TUN accepted")
+	}
+}
+
+func TestXHTTPProxyConfig(t *testing.T) {
+	config := configFor(t, "vless://"+uuid+"@be.example.com:443?encryption=none&security=tls&sni=be.example.com&type=xhttp&host=be.example.com&path=%2Fms7&mode=auto#BE", "system-proxy")
 	outbound := proxyOutbound(config)
 	stream := outbound["streamSettings"].(map[string]any)
 	if stream["network"] != "xhttp" {
@@ -66,29 +86,14 @@ func TestXHTTPAndTunConfig(t *testing.T) {
 	if _, ok := stream["xhttpSettings"].(map[string]any); !ok {
 		t.Fatal("xhttpSettings missing")
 	}
-	inbound := config["inbounds"].([]any)[0].(map[string]any)
-	if inbound["protocol"] != "tun" {
-		t.Fatalf("inbound: %+v", inbound)
-	}
-	settings := inbound["settings"].(map[string]any)
-	if settings["autoOutboundsInterface"] != "auto" {
-		t.Fatalf("autoOutboundsInterface: %+v", settings)
-	}
+
 }
 
-// Hysteria2 в Xray-core отсутствует. Раньше приложение собирало для него
-// конфиг, который ядро отклоняло уже при запуске; теперь такая нода честно
-// помечается неподдерживаемой ещё в списке серверов.
+// Hysteria2 imports for sing-box but must never be passed to Xray.
 func TestHysteria2RejectedUpFront(t *testing.T) {
 	node, _, err := subscription.ParseURI("hy2://hy-auth@hy.example.com:443?sni=hy.example.com#HY2")
 	if err != nil {
 		t.Fatal(err)
-	}
-	if node.Supported {
-		t.Fatal("hysteria2 не должен помечаться поддерживаемым")
-	}
-	if !strings.Contains(node.UnsupportedReason, "Hysteria2") {
-		t.Fatalf("причина: %q", node.UnsupportedReason)
 	}
 	if _, err := BuildConfig(node, ConfigOptions{Mode: "system-proxy"}); err == nil {
 		t.Fatal("BuildConfig должен отказать")
@@ -98,7 +103,7 @@ func TestHysteria2RejectedUpFront(t *testing.T) {
 // Конфиг не должен ссылаться на geoip/geosite, пока не включена блокировка
 // рекламы: иначе Xray читает 30 МБ geo-файлов на каждом запуске.
 func TestNoGeoFilesInDefaultConfig(t *testing.T) {
-	for _, mode := range []string{"system-proxy", "tun"} {
+	for _, mode := range []string{"system-proxy"} {
 		raw, err := BuildConfig(mustNode(t), ConfigOptions{Mode: mode})
 		if err != nil {
 			t.Fatal(err)

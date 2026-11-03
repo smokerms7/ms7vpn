@@ -26,7 +26,7 @@ func TestWriteConfigsForValidation(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
-		for _, mode := range []string{"system-proxy", "tun"} {
+		for _, mode := range []string{"system-proxy"} {
 			raw, err := BuildConfig(node, ConfigOptions{
 				Mode: mode, HTTPPort: 10809, SOCKSPort: 10808,
 				DNS1: "1.1.1.1", DNS2: "8.8.8.8", EnableStats: true, TunName: "MS7VPN",

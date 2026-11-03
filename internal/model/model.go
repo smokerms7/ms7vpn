@@ -2,7 +2,7 @@ package model
 
 import "time"
 
-const AppVersion = "ms7.vs2.4"
+const AppVersion = "ms7.vs2.5"
 
 type UserInfo struct {
 	UploadBytes   int64 `json:"uploadBytes,omitempty"`
@@ -54,6 +54,7 @@ type Settings struct {
 	Mode string `json:"mode"` // vpn | zapret
 
 	ConnectionMode string `json:"connectionMode"` // tun | system-proxy
+	Engine         string `json:"engine"`         // xray | sing-box
 	AutoRefresh    bool   `json:"autoRefresh"`
 	AutoConnect    bool   `json:"autoConnect"`
 	BlockAds       bool   `json:"blockAds"`
@@ -72,6 +73,7 @@ type Settings struct {
 }
 
 type CoreState struct {
+	Engine        string `json:"engine"`
 	Installed     bool   `json:"installed"`
 	Version       string `json:"version"`
 	Downloading   bool   `json:"downloading"`
@@ -81,6 +83,7 @@ type CoreState struct {
 }
 
 type ConnectionState struct {
+	Engine         string    `json:"engine,omitempty"`
 	Connected      bool      `json:"connected"`
 	Connecting     bool      `json:"connecting"`
 	NodeID         string    `json:"nodeId,omitempty"`
@@ -157,6 +160,7 @@ func DefaultSettings() Settings {
 	return Settings{
 		Mode:           ModeVPN,
 		ConnectionMode: "system-proxy",
+		Engine:         "xray",
 		AutoRefresh:    true,
 		AutoConnect:    false,
 		BlockAds:       false,

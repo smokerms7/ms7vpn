@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"ms7vpn/internal/model"
+	"ms7vpn/internal/singbox"
 	"ms7vpn/internal/store"
 	"ms7vpn/internal/subscription"
 	"ms7vpn/internal/update"
@@ -31,12 +32,15 @@ type APIError struct {
 func (e *APIError) Error() string { return e.Message }
 
 type App struct {
-	mu      sync.RWMutex
-	state   model.AppState
-	store   *store.Store
-	fetcher *subscription.Fetcher
-	core    *xray.Manager
-	dataDir string
+	mu        sync.RWMutex
+	state     model.AppState
+	store     *store.Store
+	fetcher   *subscription.Fetcher
+	core      *xray.Manager
+	box       *singbox.Manager
+	connectMu sync.Mutex
+	asyncWG   sync.WaitGroup
+	dataDir   string
 
 	// Режим «Запрет»: обход DPI без сервера. Своего состояния подключения у
 	// него нет — он пользуется тем же ConnectionState с Mode = zapret.
@@ -54,7 +58,10 @@ type App struct {
 
 	// Счётчики трафика: клиент локального API Xray.
 	statsMu     sync.Mutex
-	statsClient *xray.StatsClient
+	statsClient interface {
+		Query(context.Context) (xray.Traffic, error)
+		Reset()
+	}
 
 	// Отмена незавершённого подключения. Без неё нажатие «Отключить» во
 	// время долгого подключения не останавливало перебор адаптеров: Xray
@@ -94,6 +101,10 @@ func (a *App) abortConnect() {
 }
 
 func New(dataDir string) (*App, error) {
+	return newApp(dataDir, true)
+}
+
+func newApp(dataDir string, recoverNetwork bool) (*App, error) {
 	if dataDir == "" {
 		return nil, errors.New("dataDir is empty")
 	}
@@ -112,24 +123,46 @@ func New(dataDir string) (*App, error) {
 	// интерфейса: иначе один раз записанный чужой адрес обновлений жил бы до
 	// первого сохранения настроек.
 	state.Settings = normalizeSettings(state.Settings)
+	// Re-evaluate saved capabilities after adding a second core (old versions
+	// saved Hysteria2 nodes as unsupported).
+	for si := range state.Subscriptions {
+		for ni := range state.Subscriptions[si].Nodes {
+			n := &state.Subscriptions[si].Nodes[ni]
+			if parsed, _, err := subscription.ParseURI(n.RawURI); err == nil {
+				n.Supported = parsed.Supported
+				n.UnsupportedReason = parsed.UnsupportedReason
+			}
+		}
+	}
 	application := &App{
 		state: state, store: st, fetcher: subscription.NewFetcher(dataDir),
 		dataDir: dataDir, done: make(chan struct{}),
 	}
 	application.core = xray.NewManager(dataDir, application.onCoreProgress)
+	application.box = singbox.NewManager(dataDir, application.onCoreProgress)
 	application.zapret = zapret.NewManager(dataDir)
 	application.state.Core.Version = xray.CoreVersion
 	application.state.Core.Installed = application.core.Installed()
+	application.state.Core.Engine = state.Settings.Engine
+	if state.Settings.Engine == "sing-box" {
+		application.state.Core.Version = singbox.Version
+		application.state.Core.Installed = application.box.Installed()
+	}
 
 	// Хвосты предыдущего сеанса: если приложение было убито, xray.exe мог
 	// остаться жив и держать порты и сетевой адаптер, а системный прокси —
 	// остаться включённым, из-за чего интернет не работал вообще.
-	xray.KillOrphans(application.core.CorePath())
-	_ = RecoverSystemProxy(dataDir)
+	if recoverNetwork {
+		xray.KillOrphans(application.core.CorePath())
+		xray.KillOrphans(application.box.CorePath())
+		_ = RecoverSystemProxy(dataDir)
+	}
 	// То же и для «Запрета»: оставшийся winws продолжал бы портить пакеты, а
 	// служба драйвера — держать файл WinDivert64.sys, из-за чего ломаются
 	// обновление и удаление программы.
-	application.zapret.Cleanup()
+	if recoverNetwork {
+		application.zapret.Cleanup()
+	}
 	return application, nil
 }
 
@@ -223,6 +256,10 @@ func (a *App) RegisterRoutes(mux *http.ServeMux, token string) {
 }
 
 func (a *App) handleState(w http.ResponseWriter, r *http.Request) {
+	lifecycleIdle := a.connectMu.TryLock()
+	if lifecycleIdle {
+		defer a.connectMu.Unlock()
+	}
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, methodError())
 		return
@@ -230,12 +267,20 @@ func (a *App) handleState(w http.ResponseWriter, r *http.Request) {
 	// Опрос ядра выполняется ДО захвата a.mu. Раньше handleState держал a.mu
 	// и внутри лез в мьютекс менеджера, который был занят стартом Xray, —
 	// из-за этого весь интерфейс замирал на время подключения.
+	engine := a.Snapshot().Settings.Engine
 	installed := a.core.Installed()
-	running := a.core.Running()
+	version := xray.CoreVersion
+	if engine == "sing-box" {
+		installed = a.box.Installed()
+		version = singbox.Version
+	}
+	running := a.vpnRunning()
 	zapretState := a.zapretSnapshot()
 
 	a.mu.Lock()
 	a.state.Core.Installed = installed
+	a.state.Core.Engine = engine
+	a.state.Core.Version = version
 	a.state.Zapret = zapretState
 	// В режиме «Запрет» живость проверяется по winws, а не по Xray: ядро в
 	// этом режиме не запускается вообще, и общая проверка ниже погасила бы
@@ -253,15 +298,16 @@ func (a *App) handleState(w http.ResponseWriter, r *http.Request) {
 		}
 		a.state.Zapret.LastError = a.state.Connection.LastError
 	}
-	dropped := !zapretMode && a.state.Connection.Connected && !running
+	dropped := lifecycleIdle && !zapretMode && a.state.Connection.Connected && !running
 	if dropped {
 		a.state.Connection.Connected = false
 		a.state.Connection.Connecting = false
-		a.state.Connection.LastError = "Xray завершил работу. Откройте журнал для причины."
+		a.state.Connection.LastError = "Ядро VPN завершило работу. Откройте журнал для причины."
 	}
 	state := a.state
 	a.mu.Unlock()
 	if dropped {
+		_ = a.stopVPN()
 		_ = RestoreSystemProxy(a.dataDir)
 	}
 	writeOK(w, state)
@@ -660,303 +706,6 @@ func (a *App) handleConnect(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, state)
 }
 
-func (a *App) Connect(parent context.Context, nodeID, mode string) (model.AppState, error) {
-	// В режиме «Запрет» сервер не нужен, поэтому nodeID здесь не значит
-	// ничего: кнопка «Включить» на главной одна и та же, а расходятся режимы
-	// тут. Так интерфейсу не приходится знать, какой запрос куда отправлять.
-	a.mu.RLock()
-	appMode := a.state.Settings.Mode
-	a.mu.RUnlock()
-	if appMode == model.ModeZapret {
-		return a.EnableZapret(parent)
-	}
-
-	ctx, finish := a.beginConnect(parent)
-	defer finish()
-
-	a.mu.Lock()
-	if a.state.Connection.Connecting {
-		a.mu.Unlock()
-		return model.AppState{}, &APIError{Code: "BUSY", Message: "Подключение уже выполняется"}
-	}
-	if nodeID == "" {
-		nodeID = a.state.SelectedNodeID
-	}
-	node, subID, found := a.findNodeLocked(nodeID)
-	if !found {
-		a.mu.Unlock()
-		return model.AppState{}, &APIError{Code: "NODE_NOT_FOUND", Message: "Сначала выберите сервер"}
-	}
-	if !node.Supported {
-		a.mu.Unlock()
-		return model.AppState{}, &APIError{Code: "NODE_UNSUPPORTED", Message: node.UnsupportedReason}
-	}
-	if mode == "" {
-		mode = a.state.Settings.ConnectionMode
-	}
-	if mode != "tun" && mode != "system-proxy" {
-		mode = "system-proxy"
-	}
-	var fallbackNote string
-	if mode == "tun" && !IsAdministrator() {
-		// Раньше здесь был отказ, и пользователь оставался без подключения
-		// вовсе. Системный прокси прав не требует и работает всегда.
-		mode = "system-proxy"
-		fallbackNote = "TUN требует запуска от имени администратора — подключено через системный прокси"
-	}
-	a.state.Connection = model.ConnectionState{Connecting: true, NodeID: node.ID, NodeName: node.Name, Mode: mode, StatusMessage: "Подготовка Xray-core…"}
-	a.state.SelectedNodeID = node.ID
-	a.state.SelectedSubID = subID
-	a.mu.Unlock()
-
-	a.logf("подключение: сервер %q, режим %s", node.Name, mode)
-
-	fail := func(err error) (model.AppState, error) {
-		a.logf("ОШИБКА подключения: %v", err)
-		_ = a.core.Stop()
-		_ = RestoreSystemProxy(a.dataDir)
-		a.mu.Lock()
-		a.state.Connection.Connecting = false
-		a.state.Connection.Connected = false
-		a.state.Connection.LastError = err.Error()
-		a.state.Connection.StatusMessage = "Ошибка подключения"
-		state := a.state
-		a.mu.Unlock()
-		return state, &APIError{Code: "CONNECT_FAILED", Message: err.Error()}
-	}
-
-	// Настройки снимаются один раз. Раньше Snapshot() вызывался шесть раз
-	// подряд внутри цикла, каждый раз копируя весь список серверов.
-	settings := a.Snapshot().Settings
-
-	ensureCtx, cancel := context.WithTimeout(ctx, 9*time.Minute)
-	err := a.core.Ensure(ensureCtx)
-	cancel()
-	if err != nil {
-		return fail(err)
-	}
-
-	if err := a.core.Stop(); err != nil {
-		return fail(err)
-	}
-	// Оставшийся от прошлой попытки xray.exe держит сетевой адаптер и
-	// локальные порты. Раньше это проверялось только при запуске программы,
-	// поэтому повторное подключение билось в занятый порт снова и снова.
-	if killed := xray.KillOrphans(a.core.CorePath()); killed > 0 {
-		a.logf("закрыто зависших процессов Xray: %d", killed)
-		time.Sleep(400 * time.Millisecond)
-	}
-	_ = RestoreSystemProxy(a.dataDir)
-
-	httpPort, socksPort := 10809, 10808
-	if mode != "tun" {
-		httpPort = xray.FreeLocalPort(10809)
-		socksPort = xray.FreeLocalPort(10808)
-		if socksPort == httpPort {
-			socksPort = xray.FreeLocalPort(httpPort + 1)
-		}
-	}
-	a.portMu.Lock()
-	a.httpPort, a.socksPort = httpPort, socksPort
-	a.portMu.Unlock()
-	if mode != "tun" {
-		a.logf("порты: http=%d socks=%d", httpPort, socksPort)
-	}
-
-	// Порт счётчиков подбирается свободным. Зашитый 10085 в прошлой версии
-	// ронял подключение целиком, когда его занимал прошлый процесс Xray.
-	apiPort := xray.FreeLocalPort(xray.APIPort)
-	a.statsMu.Lock()
-	a.statsClient = xray.NewStatsClient(apiPort)
-	a.statsMu.Unlock()
-
-	// Имя сетевого адаптера для TUN. Если предыдущий запуск оборвался или другой
-	// VPN-клиент держит адаптер, Wintun отвечает «файл уже существует», поэтому
-	// пробуем несколько имён подряд.
-	tunNames := []string{"MS7VPN"}
-	if mode == "tun" {
-		tunNames = append(tunNames, fmt.Sprintf("MS7VPN-%d", time.Now().Unix()%1000))
-	}
-
-	var warnings []string
-	for attempt, tunName := range tunNames {
-		built, buildErr := xray.Build(node, xray.ConfigOptions{
-			Mode: mode, HTTPPort: httpPort, SOCKSPort: socksPort,
-			DNS1: settings.DNS1, DNS2: settings.DNS2,
-			BlockAds:    settings.BlockAds,
-			AccessLog:   filepath.Join(a.core.RuntimeDir(), "access.log"),
-			ErrorLog:    filepath.Join(a.core.RuntimeDir(), "error.log"),
-			TunName:     tunName,
-			GeoDir:      a.core.CoreDir(),
-			APIPort:     apiPort,
-			EnableStats: true,
-		})
-		if buildErr != nil {
-			return fail(buildErr)
-		}
-		warnings = built.Warnings
-
-		if startErr := a.core.Start(built.Config, mode); startErr != nil {
-			return fail(startErr)
-		}
-		// Короткая проверка «процесс не умер сразу». Если умер — менеджер сам
-		// прогонит `xray run -test` и вернёт настоящую причину.
-		aliveCtx, aliveCancel := context.WithTimeout(ctx, 20*time.Second)
-		aliveErr := a.core.WaitAlive(aliveCtx, 400*time.Millisecond)
-		aliveCancel()
-		if aliveErr != nil {
-			return fail(aliveErr)
-		}
-
-		if mode != "tun" {
-			break
-		}
-		a.mu.Lock()
-		a.state.Connection.StatusMessage = "Создаём сетевой адаптер…"
-		a.mu.Unlock()
-		tunErr := a.waitTunReady(ctx, settings.TestURL)
-		if tunErr == nil {
-			a.logf("туннель поднят, имя адаптера %s", tunName)
-			break
-		}
-		a.logf("адаптер %s не заработал: %v", tunName, tunErr)
-		_ = a.core.Stop()
-		if attempt == len(tunNames)-1 {
-			// Сетевой адаптер может не подниматься по причинам вне программы:
-			// занятый Wintun, антивирус, следы прошлых запусков. Оставлять
-			// человека совсем без связи из-за этого неправильно — переходим
-			// на системный прокси, который прав не требует и работает всегда.
-			a.logf("TUN не поднялся, перехожу на системный прокси")
-			mode = "system-proxy"
-			fallbackNote = "Сетевой адаптер не поднялся — подключено через системный прокси. " +
-				"Для TUN закройте другие VPN-приложения и перезагрузите компьютер"
-			httpPort = xray.FreeLocalPort(10809)
-			socksPort = xray.FreeLocalPort(10808)
-			if socksPort == httpPort {
-				socksPort = xray.FreeLocalPort(httpPort + 1)
-			}
-			a.portMu.Lock()
-			a.httpPort, a.socksPort = httpPort, socksPort
-			a.portMu.Unlock()
-
-			built, buildErr := xray.Build(node, xray.ConfigOptions{
-				Mode: mode, HTTPPort: httpPort, SOCKSPort: socksPort,
-				DNS1: settings.DNS1, DNS2: settings.DNS2,
-				BlockAds:    settings.BlockAds,
-				AccessLog:   filepath.Join(a.core.RuntimeDir(), "access.log"),
-				ErrorLog:    filepath.Join(a.core.RuntimeDir(), "error.log"),
-				GeoDir:      a.core.CoreDir(),
-				APIPort:     apiPort,
-				EnableStats: true,
-			})
-			if buildErr != nil {
-				return fail(buildErr)
-			}
-			warnings = built.Warnings
-			if startErr := a.core.Start(built.Config, mode); startErr != nil {
-				return fail(startErr)
-			}
-			aliveCtx, aliveCancel := context.WithTimeout(ctx, 20*time.Second)
-			aliveErr := a.core.WaitAlive(aliveCtx, 400*time.Millisecond)
-			aliveCancel()
-			if aliveErr != nil {
-				return fail(aliveErr)
-			}
-			break
-		}
-	}
-
-	if mode == "system-proxy" {
-		portCtx, portCancel := context.WithTimeout(ctx, 7*time.Second)
-		err = xray.WaitLocalPort(portCtx, httpPort, 6*time.Second)
-		portCancel()
-		if err != nil {
-			return fail(fmt.Errorf("Xray запущен, но HTTP proxy не открылся: %w", err))
-		}
-
-		// Реальный запрос через Xray до того, как трогать настройки Windows.
-		testCtx, testCancel := context.WithTimeout(ctx, 18*time.Second)
-		err = xray.VerifyHTTPProxy(testCtx, httpPort, settings.TestURL)
-		testCancel()
-		if err != nil {
-			return fail(fmt.Errorf("сервер не прошёл контроль соединения через Xray: %w", err))
-		}
-
-		if err := EnableSystemProxy(a.dataDir, httpPort, socksPort); err != nil {
-			return fail(fmt.Errorf("не удалось включить системный proxy: %w", err))
-		}
-	}
-	// Для TUN отдельная проверка не нужна: waitTunReady уже убедился, что
-	// трафик реально идёт через адаптер.
-
-	a.mu.Lock()
-	if fallbackNote != "" {
-		warnings = append([]string{fallbackNote}, warnings...)
-		// Запоминаем рабочий режим, чтобы следующее подключение не тратило
-		// снова полминуты на заведомо неудачную попытку поднять адаптер.
-		a.state.Settings.ConnectionMode = mode
-	}
-	a.state.Connection = model.ConnectionState{
-		Connected: true, NodeID: node.ID, NodeName: node.Name, Mode: mode,
-		StartedAt: time.Now(), StatusMessage: "Подключено",
-		Warnings: warnings,
-	}
-	if mode == "system-proxy" {
-		a.state.Connection.LocalHTTPProxy = fmt.Sprintf("127.0.0.1:%d", httpPort)
-		a.state.Connection.LocalSOCKS = fmt.Sprintf("127.0.0.1:%d", socksPort)
-	}
-	a.state.SelectedNodeID = node.ID
-	a.state.SelectedSubID = subID
-	a.state.RecentNodeIDs = prependUnique(a.state.RecentNodeIDs, node.ID, 20)
-	a.logf("подключено: %s (%s)", node.Name, mode)
-	_ = a.store.Save(a.state)
-	state := a.state
-	a.mu.Unlock()
-	return state, nil
-}
-
-// waitTunReady ждёт, пока туннель действительно заработает.
-//
-// Единственный надёжный признак — прошедший контрольный запрос. Привязка к
-// строкам журнала Xray оказалась негодной: «Creating adapter» появляется в
-// момент начала создания адаптера, а сообщения об успехе может не быть вовсе.
-func (a *App) waitTunReady(ctx context.Context, testURL string) error {
-	// Адаптеру и маршрутам нужно время появиться в системе.
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-time.After(1200 * time.Millisecond):
-	}
-
-	deadline := time.Now().Add(20 * time.Second)
-	var lastProbeErr error
-	for time.Now().Before(deadline) {
-		log := a.core.TailLog(80)
-		if failure := tunFailure(log); failure != nil {
-			return failure
-		}
-		if !a.core.Running() {
-			return fmt.Errorf("Xray остановился при создании адаптера:\n%s", tailLines(log, 8))
-		}
-
-		probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		lastProbeErr = xray.VerifySystemPath(probeCtx, testURL)
-		cancel()
-		if lastProbeErr == nil {
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(500 * time.Millisecond):
-		}
-	}
-	if lastProbeErr != nil {
-		return fmt.Errorf("адаптер поднят, но трафик через него не пошёл: %w", lastProbeErr)
-	}
-	return errors.New("не удалось поднять туннель за 20 секунд")
-}
-
 // tunFailure распознаёт типовые причины, по которым Wintun не создаётся.
 func tunFailure(log string) error {
 	lower := strings.ToLower(log)
@@ -1010,7 +759,9 @@ func (a *App) Disconnect() (model.AppState, error) {
 		a.statsClient.Reset()
 	}
 	a.statsMu.Unlock()
-	coreErr := a.core.Stop()
+	a.connectMu.Lock()
+	defer a.connectMu.Unlock()
+	coreErr := a.stopVPN()
 	proxyErr := RestoreSystemProxy(a.dataDir)
 	a.mu.Lock()
 	a.state.Connection = model.ConnectionState{StatusMessage: "Отключено"}
@@ -1039,7 +790,12 @@ func (a *App) handleSettings(w http.ResponseWriter, r *http.Request) {
 	a.mu.Lock()
 	connected := a.state.Connection.Connected
 	modeChanged := settings.Mode != a.state.Settings.Mode
-	if connected && !modeChanged && settings.ConnectionMode != a.state.Settings.ConnectionMode {
+	if a.state.Connection.Connecting && (modeChanged || settings.Engine != a.state.Settings.Engine || settings.ConnectionMode != a.state.Settings.ConnectionMode) {
+		a.mu.Unlock()
+		writeError(w, http.StatusConflict, &APIError{Code: "DISCONNECT_FIRST", Message: "Дождитесь завершения подключения или отключите VPN"})
+		return
+	}
+	if (connected || a.state.Connection.Connecting) && !modeChanged && (settings.ConnectionMode != a.state.Settings.ConnectionMode || settings.Engine != a.state.Settings.Engine) {
 		a.mu.Unlock()
 		writeError(w, http.StatusConflict, &APIError{Code: "DISCONNECT_FIRST", Message: "Сначала отключите VPN, затем меняйте режим"})
 		return
@@ -1054,7 +810,9 @@ func (a *App) handleSettings(w http.ResponseWriter, r *http.Request) {
 	// переключает их, чтобы сравнить. Поднимаем новый режим сам.
 	if connected && modeChanged {
 		a.logf("смена режима на %s при включённом соединении — переподключаюсь", settings.Mode)
+		a.asyncWG.Add(1)
 		go func() {
+			defer a.asyncWG.Done()
 			if settings.Mode == model.ModeZapret {
 				_, _ = a.Disconnect()
 				if _, err := a.EnableZapret(context.Background()); err != nil {
@@ -1104,6 +862,9 @@ func (a *App) handleLog(w http.ResponseWriter, r *http.Request) {
 	parts := []string{}
 	if appLog := a.AppLog(60); appLog != "" {
 		parts = append(parts, "=== MS7VPN ===\n"+appLog)
+	}
+	if boxLog := a.box.TailLog(100); boxLog != "" {
+		parts = append(parts, "=== sing-box ===\n"+boxLog)
 	}
 	if coreLog := a.core.TailLog(100); coreLog != "" {
 		parts = append(parts, "=== Xray ===\n"+coreLog)
@@ -1213,6 +974,8 @@ func (a *App) handleQuit(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) Shutdown() {
 	a.quit.Do(func() {
+		a.abortConnect()
+		a.asyncWG.Wait()
 		_, _ = a.Disconnect()
 		// Чистим за «Запретом» всегда, а не только когда он был включён в
 		// этом сеансе: иначе служба WinDivert осталась бы загруженной и
@@ -1310,6 +1073,9 @@ func normalizeSettings(settings model.Settings) model.Settings {
 	}
 	if strings.TrimSpace(settings.DNS1) == "" {
 		settings.DNS1 = defaults.DNS1
+	}
+	if settings.Engine != "xray" && settings.Engine != "sing-box" {
+		settings.Engine = defaults.Engine
 	}
 	if strings.TrimSpace(settings.DNS2) == "" {
 		settings.DNS2 = defaults.DNS2

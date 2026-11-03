@@ -137,6 +137,7 @@ const (
 	idSubRefreshAll = 407
 
 	idModeCombo    = 501
+	idEngineCombo  = 507
 	idSaveSettings = 502
 	idOpenData     = 503
 	idSupport      = 504
@@ -410,11 +411,15 @@ func (w *Window) createControls() {
 	combo := w.addCombo(idModeCombo, 220, 160, 360, 180, pageSettings)
 	sendMessage(combo, CB_ADDSTRING, 0, uintptr(unsafe.Pointer(utf16Ptr("TUN — полный системный VPN"))))
 	sendMessage(combo, CB_ADDSTRING, 0, uintptr(unsafe.Pointer(utf16Ptr("System Proxy — без прав администратора"))))
+	w.addStatic(5105, "Ядро VPN", 610, 125, 260, 28, pageSettings, false)
+	engineCombo := w.addCombo(idEngineCombo, 610, 160, 360, 180, pageSettings)
+	sendMessage(engineCombo, CB_ADDSTRING, 0, uintptr(unsafe.Pointer(utf16Ptr("Xray — XHTTP и mKCP"))))
+	sendMessage(engineCombo, CB_ADDSTRING, 0, uintptr(unsafe.Pointer(utf16Ptr("sing-box — Hysteria2"))))
 	w.addButton(idSaveSettings, "Сохранить", 220, 230, 160, 42, pageSettings)
 	w.addButton(idOpenData, "Папка данных", 390, 230, 170, 42, pageSettings)
 	w.addButton(idSupport, "Техподдержка", 570, 230, 170, 42, pageSettings)
-	w.addStatic(5103, "TUN направляет системный TCP/UDP-трафик через Xray и требует запуск от администратора.\nSystem Proxy подходит для приложений, которые используют системный прокси Windows.", 220, 310, 800, 90, pageSettings, false)
-	w.addStatic(5104, "Xray-core загружается с официального релиза при первом реальном подключении. Статус «Подключено» появляется только после контрольного запроса через туннель.", 220, 430, 800, 75, pageSettings, false)
+	w.addStatic(5103, "TUN доступен для обоих ядер и требует прав администратора.\nВ варианте Xray сетевым адаптером управляет sing-box. Перед подключением отключите другие VPN.", 220, 310, 800, 90, pageSettings, false)
+	w.addStatic(5104, "Ядра загружаются из официальных релизов с проверкой SHA-256. Для TUN проверяются маршруты и запрос с адреса адаптера MS7VPN.", 220, 430, 800, 75, pageSettings, false)
 
 	// Logs.
 	w.addStatic(6101, "ЖУРНАЛ", 220, 36, 400, 36, pageLogs, true)
@@ -629,6 +634,11 @@ func (w *Window) renderSettings(state model.AppState) {
 		idx = 1
 	}
 	sendMessage(w.controls[idModeCombo], CB_SETCURSEL, uintptr(idx), 0)
+	engineIdx := 0
+	if state.Settings.Engine == "sing-box" {
+		engineIdx = 1
+	}
+	sendMessage(w.controls[idEngineCombo], CB_SETCURSEL, uintptr(engineIdx), 0)
 }
 
 func (w *Window) handleCommand(wParam, lParam uintptr) {
@@ -872,6 +882,10 @@ func (w *Window) toggleConnection() {
 
 func (w *Window) saveSettings() {
 	state := w.app.Snapshot()
+	state.Settings.Engine = "xray"
+	if sendMessage(w.controls[idEngineCombo], CB_GETCURSEL, 0, 0) == 1 {
+		state.Settings.Engine = "sing-box"
+	}
 	idx := int(sendMessage(w.controls[idModeCombo], CB_GETCURSEL, 0, 0))
 	if idx == 1 {
 		state.Settings.ConnectionMode = "system-proxy"

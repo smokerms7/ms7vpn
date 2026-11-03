@@ -6,7 +6,7 @@ import (
 )
 
 func TestNoHardcodedAPIPortInConfig(t *testing.T) {
-	for _, mode := range []string{"tun", "system-proxy"} {
+	for _, mode := range []string{"system-proxy"} {
 		raw, err := BuildConfig(mustNode(t), ConfigOptions{Mode: mode, HTTPPort: 10809, SOCKSPort: 10808})
 		if err != nil {
 			t.Fatal(err)

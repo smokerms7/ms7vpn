@@ -695,3 +695,35 @@ func VerifySystemPath(ctx context.Context, testURL string) error {
 	}
 	return nil
 }
+
+// VerifyTUNPath cannot succeed via Happ or the ordinary physical source address.
+// Routes are checked by the caller before binding the probe to our TUN address.
+func VerifyTUNPath(ctx context.Context, testURL, sourceIP string) error {
+	if testURL == "" {
+		testURL = "https://www.gstatic.com/generate_204"
+	}
+	ip := net.ParseIP(sourceIP)
+	if ip == nil {
+		return errors.New("неверный адрес TUN")
+	}
+	dialer := &net.Dialer{LocalAddr: &net.TCPAddr{IP: ip}, Timeout: 6 * time.Second}
+	transport := &http.Transport{Proxy: nil, DialContext: func(ctx context.Context, _, address string) (net.Conn, error) {
+		return dialer.DialContext(ctx, "tcp4", address)
+	}, TLSHandshakeTimeout: 6 * time.Second, ResponseHeaderTimeout: 6 * time.Second}
+	defer transport.CloseIdleConnections()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, testURL, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("User-Agent", "MS7VPN TUN-check")
+	response, err := (&http.Client{Transport: transport, Timeout: 8 * time.Second}).Do(req)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 400 {
+		return fmt.Errorf("контрольный адрес ответил HTTP %d", response.StatusCode)
+	}
+	_, err = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+	return err
+}

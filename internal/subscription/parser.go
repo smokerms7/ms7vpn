@@ -245,10 +245,10 @@ func validateSupport(p ParsedNode) (bool, string) {
 		}
 	case "socks":
 	case "hysteria2":
-		// Hysteria2 — это протокол sing-box/mihomo. В Xray-core его нет, и
-		// раньше приложение молча собирало конфиг, который ядро отклоняло.
-		// Честнее сразу сказать, что такой сервер здесь не заработает.
-		return false, "Hysteria2 не поддерживается ядром Xray — выберите VLESS, VMess, Trojan или Shadowsocks"
+		if p.HysteriaAuth == "" {
+			return false, "в Hysteria2 отсутствует пароль"
+		}
+		return true, ""
 	default:
 		return false, "протокол пока не поддерживается"
 	}

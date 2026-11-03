@@ -1,0 +1,266 @@
+package app
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"net"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"ms7vpn/internal/model"
+	"ms7vpn/internal/singbox"
+	"ms7vpn/internal/xray"
+)
+
+func (a *App) stopVPN() error { return errors.Join(a.box.Stop(), a.core.Stop()) }
+func (a *App) vpnRunning() bool {
+	c := a.Snapshot().Connection
+	if c.Engine == "sing-box" {
+		return a.box.Running()
+	}
+	return a.core.Running() && (c.Mode != "tun" || a.box.Running())
+}
+
+func (a *App) Connect(parent context.Context, nodeID, mode string) (model.AppState, error) {
+	if a.Snapshot().Settings.Mode == model.ModeZapret {
+		return a.EnableZapret(parent)
+	}
+	if !a.connectMu.TryLock() {
+		return a.Snapshot(), &APIError{Code: "BUSY", Message: "Подключение уже выполняется"}
+	}
+	defer a.connectMu.Unlock()
+	ctx, finish := a.beginConnect(parent)
+	defer finish()
+	settings := a.Snapshot().Settings
+	if mode == "" {
+		mode = settings.ConnectionMode
+	}
+	if mode != "tun" && mode != "system-proxy" {
+		return a.Snapshot(), &APIError{Code: "INVALID_MODE", Message: "Неизвестный режим подключения"}
+	}
+	// Never silently downgrade a requested full tunnel to an application proxy.
+	if mode == "tun" && !IsAdministrator() {
+		return a.Snapshot(), &APIError{Code: "NEED_ADMIN", Message: "Для TUN нужен запуск от имени администратора"}
+	}
+	a.mu.RLock()
+	if nodeID == "" {
+		nodeID = a.state.SelectedNodeID
+	}
+	node, subID, found := a.findNodeLocked(nodeID)
+	a.mu.RUnlock()
+	if !found {
+		return a.Snapshot(), &APIError{Code: "NODE_NOT_FOUND", Message: "Сначала выберите сервер"}
+	}
+	if settings.Engine == "sing-box" {
+		if _, err := singbox.Outbound(node); err != nil {
+			return a.Snapshot(), &APIError{Code: "NODE_UNSUPPORTED", Message: err.Error()}
+		}
+	} else {
+		if _, err := xray.Build(node, xray.ConfigOptions{Mode: "system-proxy"}); err != nil {
+			return a.Snapshot(), &APIError{Code: "NODE_UNSUPPORTED", Message: err.Error()}
+		}
+	}
+	var iface, serverIP string
+	if mode == "tun" {
+		checkCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		var err error
+		iface, err = tunEnvironment(checkCtx)
+		cancel()
+		if err != nil {
+			return a.Snapshot(), &APIError{Code: "TUN_NETWORK_CONFLICT", Message: err.Error()}
+		}
+		if settings.Engine == "xray" {
+			if ip := net.ParseIP(node.Address); ip != nil {
+				serverIP = ip.String()
+			} else {
+				resolveCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+				ips, err := net.DefaultResolver.LookupIP(resolveCtx, "ip4", node.Address)
+				cancel()
+				if err != nil || len(ips) == 0 {
+					return a.Snapshot(), &APIError{Code: "SERVER_DNS_FAILED", Message: "Не удалось разрешить адрес VPN-сервера до запуска TUN"}
+				}
+				serverIP = ips[0].String()
+			}
+		}
+	}
+	if err := a.stopVPN(); err != nil {
+		return a.Snapshot(), err
+	}
+	if err := RestoreSystemProxy(a.dataDir); err != nil {
+		return a.Snapshot(), err
+	}
+	a.statsMu.Lock()
+	a.statsClient = nil
+	a.statsMu.Unlock()
+	a.mu.Lock()
+	a.state.Connection = model.ConnectionState{Connecting: true, NodeID: node.ID, NodeName: node.Name, Mode: mode, Engine: settings.Engine, StatusMessage: "Подготовка ядра VPN…"}
+	a.mu.Unlock()
+	a.logf("подключение: сервер %q, ядро %s, режим %s", node.Name, settings.Engine, mode)
+	fail := func(err error) (model.AppState, error) {
+		if settings.Engine == "sing-box" && strings.Contains(a.box.TailLog(20), "reality verification failed") {
+			err = fmt.Errorf("sing-box не прошёл проверку REALITY этого сервера. Выберите ядро Xray или сервер TLS/Hysteria2. Проверка подлинности не отключалась: %w", err)
+		}
+		a.logf("ОШИБКА подключения: %v", err)
+		_ = a.stopVPN()
+		_ = RestoreSystemProxy(a.dataDir)
+		a.mu.Lock()
+		a.state.Connection = model.ConnectionState{Mode: mode, Engine: settings.Engine, LastError: err.Error(), StatusMessage: "Ошибка подключения"}
+		state := a.state
+		a.mu.Unlock()
+		return state, &APIError{Code: "CONNECT_FAILED", Message: err.Error()}
+	}
+	if err := ctx.Err(); err != nil {
+		return fail(err)
+	}
+	httpPort := xray.FreeLocalPort(10809)
+	socksPort := xray.FreeLocalPort(httpPort + 1)
+	apiPort := xray.FreeLocalPort(10085)
+	if apiPort == httpPort || apiPort == socksPort {
+		apiPort = xray.FreeLocalPort(socksPort + 1)
+	}
+	var warnings []string
+	if settings.Engine == "xray" {
+		ensureCtx, cancel := context.WithTimeout(ctx, 9*time.Minute)
+		err := a.core.Ensure(ensureCtx)
+		cancel()
+		if err != nil {
+			return fail(err)
+		}
+		built, err := xray.Build(node, xray.ConfigOptions{Mode: "system-proxy", HTTPPort: httpPort, SOCKSPort: socksPort, APIPort: apiPort, EnableStats: true, DNS1: settings.DNS1, DNS2: settings.DNS2, BlockAds: settings.BlockAds, GeoDir: a.core.CoreDir(), AccessLog: filepath.Join(a.core.RuntimeDir(), "access.log"), ErrorLog: filepath.Join(a.core.RuntimeDir(), "error.log"), BindInterface: iface, ServerIP: serverIP})
+		if err != nil {
+			return fail(err)
+		}
+		warnings = built.Warnings
+		if err := ctx.Err(); err != nil {
+			return fail(err)
+		}
+		if err := a.core.Start(built.Config, "system-proxy"); err != nil {
+			return fail(err)
+		}
+		if err := a.core.WaitAlive(ctx, 400*time.Millisecond); err != nil {
+			return fail(err)
+		}
+		if mode == "system-proxy" {
+			a.statsMu.Lock()
+			a.statsClient = xray.NewStatsClient(apiPort)
+			a.statsMu.Unlock()
+		}
+	}
+	if settings.Engine == "sing-box" || mode == "tun" {
+		ensureCtx, cancel := context.WithTimeout(ctx, 9*time.Minute)
+		err := a.box.Ensure(ensureCtx)
+		cancel()
+		if err != nil {
+			return fail(err)
+		}
+		// The control API is local and authenticated, including when a browser runs.
+		var secretBytes [32]byte
+		if _, err := rand.Read(secretBytes[:]); err != nil {
+			return fail(err)
+		}
+		secret := hex.EncodeToString(secretBytes[:])
+		boxPort := xray.FreeLocalPort(apiPort + 1)
+		if boxPort == httpPort || boxPort == socksPort {
+			boxPort = xray.FreeLocalPort(socksPort + 2)
+		}
+		o := singbox.Options{Mode: mode, HTTPPort: httpPort, SOCKSPort: socksPort, APIPort: boxPort, Secret: secret, DNS1: settings.DNS1, DNS2: settings.DNS2, Interface: iface, BlockAds: settings.BlockAds}
+		if settings.Engine == "xray" {
+			o.XraySOCKSPort = socksPort
+			warnings = append(warnings, "TUN: sing-box; соединение с VPN-сервером: Xray")
+		}
+		config, err := singbox.Build(node, o)
+		if err != nil {
+			return fail(err)
+		}
+		if err := ctx.Err(); err != nil {
+			return fail(err)
+		}
+		if err := a.box.Start(ctx, config); err != nil {
+			return fail(err)
+		}
+		if err := a.box.WaitAlive(ctx); err != nil {
+			return fail(err)
+		}
+		a.statsMu.Lock()
+		a.statsClient = singbox.NewStatsClient(boxPort, secret)
+		a.statsMu.Unlock()
+		if settings.BlockAds {
+			warnings = append(warnings, "sing-box использует встроенный базовый список рекламных доменов")
+		}
+	}
+	if mode == "tun" {
+		if err := a.waitTunReady(ctx, settings.TestURL); err != nil {
+			return fail(err)
+		}
+	} else {
+		checkCtx, cancel := context.WithTimeout(ctx, 18*time.Second)
+		err := xray.VerifyHTTPProxy(checkCtx, httpPort, settings.TestURL)
+		cancel()
+		if err != nil {
+			return fail(fmt.Errorf("проверка через %s: %w", settings.Engine, err))
+		}
+		if err := ctx.Err(); err != nil {
+			return fail(err)
+		}
+		if err := EnableSystemProxy(a.dataDir, httpPort, socksPort); err != nil {
+			return fail(err)
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return fail(err)
+	}
+	a.portMu.Lock()
+	a.httpPort = httpPort
+	a.socksPort = socksPort
+	a.portMu.Unlock()
+	a.mu.Lock()
+	a.state.Connection = model.ConnectionState{Connected: true, NodeID: node.ID, NodeName: node.Name, Mode: mode, Engine: settings.Engine, StartedAt: time.Now(), StatusMessage: "Подключено", Warnings: warnings}
+	if mode == "system-proxy" {
+		a.state.Connection.LocalHTTPProxy = fmt.Sprintf("127.0.0.1:%d", httpPort)
+		a.state.Connection.LocalSOCKS = fmt.Sprintf("127.0.0.1:%d", socksPort)
+	}
+	a.state.SelectedNodeID = node.ID
+	a.state.SelectedSubID = subID
+	a.state.RecentNodeIDs = prependUnique(a.state.RecentNodeIDs, node.ID, 20)
+	saveErr := a.store.Save(a.state)
+	state := a.state
+	a.mu.Unlock()
+	if saveErr != nil {
+		return fail(saveErr)
+	}
+	a.logf("подключено: %s (%s, %s)", node.Name, settings.Engine, mode)
+	return state, nil
+}
+
+func (a *App) waitTunReady(ctx context.Context, testURL string) error {
+	deadline := time.Now().Add(30 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if !a.vpnRunning() {
+			return fmt.Errorf("ядро остановилось при запуске TUN: %s", a.box.TailLog(12))
+		}
+		probeCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+		lastErr = verifyTunRoutes(probeCtx)
+		if lastErr == nil {
+			lastErr = xray.VerifyTUNPath(probeCtx, testURL, singbox.TunIPv4)
+		}
+		cancel()
+		if lastErr == nil {
+			a.logf("проверен TUN %s: маршруты IPv4 и контрольный запрос с адреса адаптера", singbox.TunName)
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+	return fmt.Errorf("TUN не прошёл проверку: %w", lastErr)
+}

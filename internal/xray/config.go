@@ -43,16 +43,18 @@ var directDomains = []string{
 }
 
 type ConfigOptions struct {
-	Mode      string
-	HTTPPort  int
-	SOCKSPort int
-	APIPort   int
-	DNS1      string
-	DNS2      string
-	BlockAds  bool
-	AccessLog string
-	ErrorLog  string
-	TunName   string
+	Mode          string
+	HTTPPort      int
+	SOCKSPort     int
+	APIPort       int
+	DNS1          string
+	DNS2          string
+	BlockAds      bool
+	AccessLog     string
+	ErrorLog      string
+	TunName       string
+	BindInterface string
+	ServerIP      string
 
 	// GeoDir — папка, где лежат geosite.dat/geoip.dat. Нужна только для
 	// блокировки рекламы; если файлов нет, правило не добавляется, иначе
@@ -90,9 +92,33 @@ func Build(node model.Node, options ConfigOptions) (BuildResult, error) {
 	if err != nil {
 		return BuildResult{}, fmt.Errorf("разбор профиля: %w", err)
 	}
+	if parsed.Protocol == "hysteria2" {
+		return BuildResult{}, errors.New("Hysteria2 требует ядро sing-box — выберите его в настройках")
+	}
 	outbound, err := buildOutbound(parsed)
 	if err != nil {
 		return BuildResult{}, err
+	}
+	// The protocol engine must use the physical interface while sing-box
+	// owns TUN routes. Resolve the server before TUN to avoid DNS recursion.
+	if options.ServerIP != "" {
+		settings := outbound["settings"].(map[string]any)
+		for _, key := range []string{"vnext", "servers"} {
+			if servers, ok := settings[key].([]any); ok && len(servers) > 0 {
+				servers[0].(map[string]any)["address"] = options.ServerIP
+			}
+		}
+	}
+	if options.BindInterface != "" {
+		stream, _ := outbound["streamSettings"].(map[string]any)
+		if stream == nil {
+			stream = map[string]any{}
+			outbound["streamSettings"] = stream
+		}
+		stream["sockopt"] = map[string]any{"interface": options.BindInterface}
+	}
+	if strings.EqualFold(options.Mode, "tun") {
+		return BuildResult{}, errors.New("TUN управляется сетевым слоем sing-box; запустите Xray с локальным SOCKS")
 	}
 
 	if options.HTTPPort == 0 {
@@ -195,33 +221,7 @@ func buildOutbounds(proxy map[string]any) []any {
 }
 
 func buildInbounds(options ConfigOptions) []any {
-	if strings.EqualFold(options.Mode, "tun") {
-		tunName := strings.TrimSpace(options.TunName)
-		if tunName == "" {
-			tunName = "MS7VPN"
-		}
-		return []any{
-			map[string]any{
-				"tag":      "tun-in",
-				"port":     0,
-				"protocol": "tun",
-				"settings": map[string]any{
-					"name":                   tunName,
-					"desc":                   "Wintun",
-					"mtu":                    1500,
-					"gateway":                []string{"172.19.0.1/30"},
-					"dns":                    []string{options.DNS1, options.DNS2},
-					"autoSystemRoutingTable": []string{"0.0.0.0/1", "128.0.0.0/1"},
-					"autoOutboundsInterface": "auto",
-				},
-				"sniffing": map[string]any{
-					"enabled":      true,
-					"destOverride": []string{"http", "tls", "quic"},
-					"routeOnly":    true,
-				},
-			},
-		}
-	}
+
 	return []any{
 		map[string]any{
 			"tag": "socks-in", "listen": "127.0.0.1", "port": options.SOCKSPort, "protocol": "socks",

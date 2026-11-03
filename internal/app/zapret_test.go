@@ -35,11 +35,11 @@ func TestNormalizeSettingsMode(t *testing.T) {
 
 func newTestApp(t *testing.T) *App {
 	t.Helper()
-	application, err := New(t.TempDir())
+	application, err := newApp(t.TempDir(), false)
 	if err != nil {
 		t.Fatalf("приложение не создалось: %v", err)
 	}
-	t.Cleanup(application.Shutdown)
+	t.Cleanup(func() { application.asyncWG.Wait(); close(application.done) })
 	return application
 }
 

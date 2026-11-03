@@ -143,10 +143,10 @@ func TestProfileTitleBase64Prefix(t *testing.T) {
 // валидный base64 и декодировалось в бинарный мусор.
 func TestParseProfileTitleKeepsPlainNames(t *testing.T) {
 	cases := map[string]string{
-		"MS7VPN":       "MS7VPN",
-		"MS7 VPN":      "MS7 VPN",
-		"Подписка":     "Подписка",
-		"base64:0JzQodep": "",  // битый base64 — остаётся как есть, но без мусора
+		"MS7VPN":          "MS7VPN",
+		"MS7 VPN":         "MS7 VPN",
+		"Подписка":        "Подписка",
+		"base64:0JzQodep": "", // битый base64 — остаётся как есть, но без мусора
 	}
 	for input, want := range cases {
 		got := ParseProfileTitle(input)
@@ -169,12 +169,12 @@ func TestParseProfileTitleDecodesRealBase64(t *testing.T) {
 	}
 }
 
-func TestHysteria2MarkedUnsupported(t *testing.T) {
+func TestHysteria2AvailableForSingBox(t *testing.T) {
 	node, _, err := ParseURI("hy2://hy-auth@hy.example.com:443?sni=hy.example.com#HY2")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if node.Supported {
-		t.Fatal("hysteria2 не должен быть поддерживаемым: в Xray-core такого протокола нет")
+	if !node.Supported {
+		t.Fatal("Hysteria2 должен импортироваться для sing-box")
 	}
 }

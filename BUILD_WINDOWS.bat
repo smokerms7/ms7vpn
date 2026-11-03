@@ -7,11 +7,15 @@ set GOOS=windows
 set GOARCH=amd64
 set CGO_ENABLED=0
 set LDFLAGS=-H windowsgui -s -w
+set TEST_ARGS=
+rem Explicit opt-in for environments where legacy winws cannot open the
+rem test autohostlist. All VPN/core tests still run.
+if /I "%~1"=="--skip-zapret-dryrun" set TEST_ARGS=-skip TestBundleStrategiesPassWinwsDryRun
 
 if not exist dist mkdir dist
 
 echo [1/8] Тесты
-go test ./...
+go test ./... %TEST_ARGS%
 if errorlevel 1 exit /b 1
 
 echo [2/8] Приложение
@@ -32,7 +36,11 @@ rem или отдельной загрузки.
 rem resources\zapret — файлы режима «Запрет»: winws, драйвер WinDivert,
 rem стратегии и списки. Кладутся папкой целиком: winws собран под cygwin и
 rem ищет свои dll рядом с собой.
-set LEAN=dist\MS7VPN.exe bundle\xray.exe bundle\wintun.dll dist\uninstaller.exe resources\zapret
+if not exist bundle\sing-box.exe (
+  echo Missing bundle\sing-box.exe. See README.md.
+  exit /b 1
+)
+set LEAN=dist\MS7VPN.exe bundle\xray.exe bundle\sing-box.exe bundle\wintun.dll dist\uninstaller.exe resources\zapret resources\sing-box
 go run .\cmd\mkpayload -o dist\MS7VPN-payload.zip %LEAN%
 if errorlevel 1 exit /b 1
 

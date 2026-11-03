@@ -1,5 +1,15 @@
 # Third-party components
 
+## sing-box
+
+MS7VPN bundles and/or downloads the unmodified official sing-box 1.14.4
+Windows amd64 binary from [SagerNet/sing-box](https://github.com/SagerNet/sing-box/releases/tag/v1.14.4).
+Copyright © 2022 nekohasekai. Distributed under GPL-3.0-or-later;
+the complete license is included at `resources/sing-box/LICENSE`.
+Corresponding source: [v1.14.4](https://github.com/SagerNet/sing-box/tree/v1.14.4).
+Optional libcronet.dll from the upstream archive is not bundled; this client
+does not enable Naive outbound.
+
 MS7VPN downloads and executes Xray-core from the official XTLS/Xray-core release. Xray-core is distributed under Mozilla Public License 2.0.
 
 TUN mode uses the official signed Wintun DLL. Wintun's downloadable prebuilt package contains its redistribution license. MS7VPN downloads that official package without modifying the driver.
