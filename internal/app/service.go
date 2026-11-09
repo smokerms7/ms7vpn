@@ -261,11 +261,22 @@ func (a *App) PingNodes(ctx context.Context, subscriptionID string, nodeIDs []st
 		targets = targets[:500]
 	}
 
-	type pingResult struct {
-		id     string
-		ms     int
-		status string
+	// Настоящий пинг через сервер. TCP остаётся запасным: если Xray не
+	// поднялся, и для серверов, которые Xray не умеет (Hysteria2 — UDP, TCP
+	// по нему ничего не скажет, такие просто сбрасываются).
+	settings := a.Snapshot().Settings
+	if settings.PingMode != model.PingTCP {
+		realResults, rest, err := a.realPing(ctx, targets, settings)
+		if err == nil {
+			a.logf("пинг через серверы: проверено %d", len(realResults))
+			for _, node := range rest {
+				realResults[node.ID] = pingResult{id: node.ID, ms: 0, status: ""}
+			}
+			return a.applyPingResults(realResults), nil
+		}
+		a.logf("проверка пинга через серверы не удалась, меряю по TCP: %v", err)
 	}
+
 	jobs := make(chan model.Node)
 	results := make(chan pingResult, len(targets))
 	workers := 12
@@ -316,6 +327,11 @@ func (a *App) PingNodes(ctx context.Context, subscriptionID string, nodeIDs []st
 	if err := ctx.Err(); err != nil && len(resultMap) == 0 {
 		return a.Snapshot(), fmt.Errorf("проверка пинга отменена: %w", err)
 	}
+	return a.applyPingResults(resultMap), nil
+}
+
+// applyPingResults записывает результаты в состояние и сохраняет его.
+func (a *App) applyPingResults(resultMap map[string]pingResult) model.AppState {
 	now := time.Now()
 	a.mu.Lock()
 	for si := range a.state.Subscriptions {
@@ -329,7 +345,7 @@ func (a *App) PingNodes(ctx context.Context, subscriptionID string, nodeIDs []st
 	_ = a.store.Save(a.state)
 	state := a.state
 	a.mu.Unlock()
-	return state, nil
+	return state
 }
 
 func (a *App) SaveSettings(settings model.Settings) (model.AppState, error) {
@@ -361,6 +377,7 @@ func (a *App) CoreLog(lines int) string {
 func (a *App) StartBackgroundTasks() {
 	go a.autoRefreshLoop()
 	go a.trafficLoop()
+	go a.livePingLoop()
 }
 
 // trafficLoop раз в секунду читает счётчики Xray и обновляет скорость.
@@ -394,6 +411,9 @@ func (a *App) trafficLoop() {
 		if err != nil {
 			continue
 		}
+
+		a.usage.addTraffic(traffic.UplinkBytes, traffic.DownlinkBytes)
+		a.usage.maybeSave(false)
 
 		a.mu.Lock()
 		if a.state.Connection.Connected {

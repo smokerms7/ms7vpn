@@ -2,7 +2,7 @@ package model
 
 import "time"
 
-const AppVersion = "ms7.vs2.5"
+const AppVersion = "ms7.vs2.6"
 
 type UserInfo struct {
 	UploadBytes   int64 `json:"uploadBytes,omitempty"`
@@ -70,7 +70,49 @@ type Settings struct {
 
 	// Оформление окна: brand (фирменное), light (светлое), dark (чёрное).
 	Theme string `json:"theme"`
+
+	// «Без VPN» — раздельное туннелирование. DirectRu пускает российские
+	// сайты (зоны .ru/.su/.рф, крупные сервисы и, если есть geoip.dat, все
+	// адреса РФ) напрямую. Списки — домены, по одному в строке:
+	// DirectDomains идут мимо VPN, ProxyDomains — всегда через VPN, даже если
+	// попадают под DirectRu. DirectApps — имена программ (chrome.exe),
+	// которые идут мимо VPN; работает только в режиме TUN.
+	DirectRu      bool     `json:"directRu"`
+	DirectDomains []string `json:"directDomains"`
+	ProxyDomains  []string `json:"proxyDomains"`
+	DirectApps    []string `json:"directApps"`
+
+	// Порядок серверов: ping (быстрые наверху), name (по алфавиту),
+	// none (как в подписке). Избранные всегда первыми.
+	ServerSort string `json:"serverSort"`
+
+	// Проверять пинг всех серверов при запуске программы.
+	AutoPing bool `json:"autoPing"`
+
+	// Как мерить пинг серверов: real-get / real-head — настоящий запрос
+	// через сам сервер (как в Shade), tcp — только соединение с портом.
+	PingMode      string `json:"pingMode"`
+	PingTimeoutMS int    `json:"pingTimeoutMs"`
+
+	// Прокси для консольных программ: на время подключения в режиме
+	// системного прокси задаёт HTTP_PROXY/HTTPS_PROXY пользователя. Node.js,
+	// git, curl и Claude Code системный прокси Windows не читают.
+	ConsoleProxy bool `json:"consoleProxy"`
 }
+
+// Способ проверки пинга.
+const (
+	PingRealGET  = "real-get"
+	PingRealHEAD = "real-head"
+	PingTCP      = "tcp"
+)
+
+// Порядок серверов в списке.
+const (
+	SortPing = "ping"
+	SortName = "name"
+	SortNone = "none"
+)
 
 type CoreState struct {
 	Engine        string `json:"engine"`
@@ -101,6 +143,11 @@ type ConnectionState struct {
 	DownlinkBytes   int64 `json:"downlinkBytes,omitempty"`
 	UplinkBitsSec   int64 `json:"uplinkBitsSec,omitempty"`
 	DownlinkBitsSec int64 `json:"downlinkBitsSec,omitempty"`
+
+	// Задержка через туннель до адреса проверки, мс. Меряется раз в
+	// несколько секунд, пока соединение включено: 0 — ещё не измерена,
+	// -1 — последний замер не прошёл.
+	PingMS int `json:"pingMs,omitempty"`
 }
 
 // ZapretState — состояние режима «Запрет» для окна.
@@ -154,6 +201,10 @@ type AppState struct {
 	Connection     ConnectionState `json:"connection"`
 	Zapret         ZapretState     `json:"zapret"`
 	RecentNodeIDs  []string        `json:"recentNodeIds,omitempty"`
+
+	// Свои названия серверов: идентификатор сервера → имя. Идентификатор
+	// считается от ссылки сервера, поэтому имя переживает обновление подписки.
+	NodeNames map[string]string `json:"nodeNames,omitempty"`
 }
 
 func DefaultSettings() Settings {
@@ -171,6 +222,13 @@ func DefaultSettings() Settings {
 		SupportURL:     "https://t.me/ms7support",
 		UpdateURL:      "https://github.com/smokerms7/ms7vpn",
 		Theme:          ThemeBrand,
+		DirectDomains:  []string{},
+		ProxyDomains:   []string{},
+		DirectApps:     []string{},
+		ServerSort:     SortPing,
+		PingMode:       PingRealGET,
+		PingTimeoutMS:  5000,
+		ConsoleProxy:   true,
 	}
 }
 

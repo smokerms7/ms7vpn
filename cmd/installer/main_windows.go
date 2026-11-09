@@ -29,6 +29,7 @@ import (
 	"ms7vpn/internal/installui"
 	"ms7vpn/internal/setup"
 
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 )
 
@@ -72,16 +73,23 @@ func main() {
 	case "/silent":
 		target := installTarget()
 		if _, err := install(target, func(int, string) {}); err != nil {
+			fmt.Fprintln(os.Stderr, err)
 			setup.Message("Установка MS7VPN", "Не удалось установить программу:\n"+err.Error(), true)
 			os.Exit(1)
 		}
 		launch(target)
 
+	case "/resume-install":
+		if len(os.Args) != 3 || !windows.GetCurrentProcessToken().IsElevated() {
+			os.Exit(1)
+		}
+		runWizard(true, os.Args[2])
+
 	case "/update":
-		runWizard(true)
+		runWizard(true, "")
 
 	default:
-		runWizard(false)
+		runWizard(false, "")
 	}
 }
 
@@ -106,10 +114,13 @@ func installTarget() string {
 	return target
 }
 
-func runWizard(autoStart bool) {
+func runWizard(autoStart bool, selectedTarget string) {
 	existing := setup.RecordedInstallDir()
 	upgrade := existing != ""
 	target := installTarget()
+	if selectedTarget != "" {
+		target = selectedTarget
+	}
 
 	caption := "Установка MS7 VPN"
 	if upgrade {
@@ -128,6 +139,7 @@ func runWizard(autoStart bool) {
 		AutoStart:      autoStart,
 		Upgrade:        upgrade,
 		ValidateDir:    validateDir,
+		PrepareInstall: prepareInstall,
 		Bullets: []string{
 			"Быстрое подключение",
 			"Обход блокировок",
@@ -163,13 +175,29 @@ func validateDir(dir string) string {
 	if info, err := os.Stat(dir); err == nil && !info.IsDir() {
 		return "По этому пути уже есть файл с таким именем. Выберите другую папку."
 	}
-	if !setup.Writable(dir) {
-		return "В эту папку нельзя записывать без прав администратора.\n\n" +
-			"Выберите другую — например, папку внутри «Локальные данные» " +
-			"вашего пользователя. MS7 VPN не требует прав администратора " +
-			"для установки."
-	}
 	return ""
+}
+
+// prepareInstall requests UAC only after the user starts installation.
+func prepareInstall(owner uintptr, dir string) (bool, error) {
+	writeErr := setup.CheckInstallDir(dir)
+	if writeErr == nil {
+		return false, nil
+	}
+	if !os.IsPermission(writeErr) || windows.GetCurrentProcessToken().IsElevated() {
+		return false, fmt.Errorf("не удалось подготовить папку установки:\n%w", writeErr)
+	}
+	self, err := os.Executable()
+	if err != nil {
+		return false, err
+	}
+	verb := windows.StringToUTF16Ptr("runas")
+	file := windows.StringToUTF16Ptr(self)
+	args := windows.StringToUTF16Ptr(windows.ComposeCommandLine([]string{"/resume-install", dir}))
+	if err := windows.ShellExecute(windows.Handle(owner), verb, file, args, nil, 1); err != nil {
+		return false, fmt.Errorf("не удалось получить права администратора для установки: %w", err)
+	}
+	return true, nil
 }
 
 // launch запускает установленную программу.
@@ -363,7 +391,7 @@ func extractFile(file *zip.File, path string) error {
 	}
 	defer source.Close()
 
-	destination, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+	destination, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o755)
 	if err != nil {
 		return fmt.Errorf("запись %s: %w", file.Name, err)
 	}

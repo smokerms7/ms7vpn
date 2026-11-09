@@ -32,7 +32,20 @@ func openLogFile(dataDir string) *os.File {
 func main() {
 	autoConnect := flag.String("autoconnect", "", "node ID to connect after an elevated restart")
 	elevated := flag.Bool("elevated", false, "marks an elevated relaunch")
+	autostart := flag.Bool("autostart", false, "started together with Windows")
 	flag.Parse()
+
+	base, err := os.UserConfigDir()
+	if err != nil {
+		log.Fatal(err)
+	}
+	dataDir := filepath.Join(base, "MS7VPN")
+
+	// Ссылка ms7vpn://add?url=… из бота или браузера. Запоминаем её до
+	// проверки второй копии: если программа уже открыта, ссылку заберёт она.
+	for _, arg := range flag.Args() {
+		_ = ms7app.SavePendingLink(dataDir, arg)
+	}
 
 	// Вторая копия не запускается: она поднимала ещё одно окно поверх той же
 	// папки профиля WebView2, из-за чего окно оставалось белым, и обе копии
@@ -49,12 +62,6 @@ func main() {
 		return
 	}
 	defer singleton.Release()
-
-	base, err := os.UserConfigDir()
-	if err != nil {
-		log.Fatal(err)
-	}
-	dataDir := filepath.Join(base, "MS7VPN")
 
 	// Программа собрана с -H windowsgui: консоли нет, и всё, что пишет
 	// стандартный log, уходило в никуда. Из-за этого белое окно WebView2
@@ -75,6 +82,12 @@ func main() {
 	defer application.Shutdown()
 
 	application.StartBackgroundTasks()
+	go func() { _ = ms7app.RegisterURLScheme() }()
+
+	// Запуск вместе с Windows — сразу в трей, если окно и так сворачивается
+	// туда при закрытии. Иначе человек получал бы окно на экране при каждом
+	// включении компьютера.
+	webui.StartHidden = *autostart && application.Snapshot().Settings.MinimizeToTray
 
 	// «Подключаться при запуске» из настроек. Раньше эта галочка в ветке с
 	// окном WebView2 не читалась вообще.

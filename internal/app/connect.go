@@ -13,16 +13,22 @@ import (
 
 	"ms7vpn/internal/model"
 	"ms7vpn/internal/singbox"
+	"ms7vpn/internal/tunnet"
 	"ms7vpn/internal/xray"
 )
 
-func (a *App) stopVPN() error { return errors.Join(a.box.Stop(), a.core.Stop()) }
+func (a *App) stopVPN() error {
+	err := errors.Join(a.box.Stop(), a.core.Stop())
+	a.cleanupNativeTun()
+	return err
+}
 func (a *App) vpnRunning() bool {
 	c := a.Snapshot().Connection
 	if c.Engine == "sing-box" {
 		return a.box.Running()
 	}
-	return a.core.Running() && (c.Mode != "tun" || a.box.Running())
+	// TUN на ядре Xray — один процесс Xray, sing-box не участвует.
+	return a.core.Running()
 }
 
 func (a *App) Connect(parent context.Context, nodeID, mode string) (model.AppState, error) {
@@ -71,6 +77,7 @@ func (a *App) Connect(parent context.Context, nodeID, mode string) (model.AppSta
 	if err := RestoreSystemProxy(a.dataDir); err != nil {
 		return a.Snapshot(), err
 	}
+	_ = RestoreConsoleProxy(a.dataDir)
 	a.statsMu.Lock()
 	a.statsClient = nil
 	a.statsMu.Unlock()
@@ -79,13 +86,18 @@ func (a *App) Connect(parent context.Context, nodeID, mode string) (model.AppSta
 	a.mu.Unlock()
 	a.logf("подключение: сервер %q, ядро %s, режим %s", node.Name, settings.Engine, mode)
 	boxStarted := false
+	// TUN с ядром Xray — встроенный TUN Xray, как в Shade (tun_native.go).
+	// sing-box для этого больше не нужен.
+	nativeTun := mode == "tun" && settings.Engine == "xray"
 	fail := func(err error) (model.AppState, error) {
 		if settings.Engine == "sing-box" && boxStarted && strings.Contains(a.box.TailLog(20), "reality verification failed") {
 			err = fmt.Errorf("sing-box не прошёл проверку REALITY этого сервера. Выберите ядро Xray или сервер TLS/Hysteria2. Проверка подлинности не отключалась: %w", err)
 		}
 		a.logf("ОШИБКА подключения: %v", err)
 		_ = a.stopVPN()
+		a.cleanupNativeTun()
 		_ = RestoreSystemProxy(a.dataDir)
+		_ = RestoreConsoleProxy(a.dataDir)
 		a.mu.Lock()
 		a.state.Connection = model.ConnectionState{Mode: mode, Engine: settings.Engine, LastError: err.Error(), StatusMessage: "Ошибка подключения"}
 		state := a.state
@@ -98,7 +110,7 @@ func (a *App) Connect(parent context.Context, nodeID, mode string) (model.AppSta
 	if settings.Engine == "xray" {
 		ensureErr = a.core.Ensure(ensureCtx)
 	}
-	if ensureErr == nil && (settings.Engine == "sing-box" || mode == "tun") {
+	if ensureErr == nil && (settings.Engine == "sing-box" || (mode == "tun" && !nativeTun)) {
 		ensureErr = a.box.Ensure(ensureCtx)
 	}
 	ensureCancel()
@@ -119,7 +131,7 @@ func (a *App) Connect(parent context.Context, nodeID, mode string) (model.AppSta
 		return state, err
 	}
 	var iface, serverIP string
-	if mode == "tun" {
+	if mode == "tun" && !nativeTun {
 		checkCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		var err error
 		iface, err = tunEnvironment(checkCtx)
@@ -157,14 +169,23 @@ func (a *App) Connect(parent context.Context, nodeID, mode string) (model.AppSta
 	if mode == "system-proxy" && (httpPort != 10809 || socksPort != 10808) {
 		warnings = append(warnings, fmt.Sprintf("Стандартные порты заняты. HTTP: 127.0.0.1:%d; SOCKS5: 127.0.0.1:%d. Если в приложении задан прокси вручную, укажите этот порт.", httpPort, socksPort))
 	}
-	if settings.Engine == "xray" {
+	if nativeTun {
+		tunWarnings, err := a.startNativeTun(ctx, nativeTunParams{node: node, settings: settings, httpPort: httpPort, socksPort: socksPort, apiPort: apiPort})
+		if err != nil {
+			return fail(err)
+		}
+		warnings = append(warnings, tunWarnings...)
+		a.statsMu.Lock()
+		a.statsClient = xray.NewStatsClient(apiPort)
+		a.statsMu.Unlock()
+	} else if settings.Engine == "xray" {
 		ensureCtx, cancel := context.WithTimeout(ctx, 9*time.Minute)
 		err := a.core.Ensure(ensureCtx)
 		cancel()
 		if err != nil {
 			return fail(err)
 		}
-		built, err := xray.Build(node, xray.ConfigOptions{Mode: "system-proxy", HTTPPort: httpPort, SOCKSPort: socksPort, APIPort: apiPort, EnableStats: true, DNS1: settings.DNS1, DNS2: settings.DNS2, BlockAds: settings.BlockAds, GeoDir: a.core.CoreDir(), AccessLog: filepath.Join(a.core.RuntimeDir(), "access.log"), ErrorLog: filepath.Join(a.core.RuntimeDir(), "error.log"), BindInterface: iface, ServerIP: serverIP})
+		built, err := xray.Build(node, xray.ConfigOptions{Mode: "system-proxy", HTTPPort: httpPort, SOCKSPort: socksPort, APIPort: apiPort, EnableStats: true, DNS1: settings.DNS1, DNS2: settings.DNS2, BlockAds: settings.BlockAds, GeoDir: a.core.CoreDir(), AccessLog: filepath.Join(a.core.RuntimeDir(), "access.log"), ErrorLog: filepath.Join(a.core.RuntimeDir(), "error.log"), BindInterface: iface, ServerIP: serverIP, DirectRu: settings.DirectRu, DirectDomains: settings.DirectDomains, ProxyDomains: settings.ProxyDomains})
 		if err != nil {
 			return fail(err)
 		}
@@ -184,7 +205,10 @@ func (a *App) Connect(parent context.Context, nodeID, mode string) (model.AppSta
 			a.statsMu.Unlock()
 		}
 	}
-	if settings.Engine == "sing-box" || mode == "tun" {
+	if settings.Engine == "sing-box" || (mode == "tun" && !nativeTun) {
+		// Адаптер прошлого неудачного сеанса: без ожидания sing-box падает
+		// с «Cannot create a file when that file already exists».
+		tunnet.WaitAdapterGone(singbox.TunName, 15*time.Second)
 		ensureCtx, cancel := context.WithTimeout(ctx, 9*time.Minute)
 		err := a.box.Ensure(ensureCtx)
 		cancel()
@@ -201,7 +225,7 @@ func (a *App) Connect(parent context.Context, nodeID, mode string) (model.AppSta
 		if boxPort == httpPort || boxPort == socksPort {
 			boxPort = xray.FreeLocalPort(socksPort + 2)
 		}
-		o := singbox.Options{Mode: mode, HTTPPort: httpPort, SOCKSPort: socksPort, APIPort: boxPort, Secret: secret, DNS1: settings.DNS1, DNS2: settings.DNS2, Interface: iface, BlockAds: settings.BlockAds}
+		o := singbox.Options{Mode: mode, HTTPPort: httpPort, SOCKSPort: socksPort, APIPort: boxPort, Secret: secret, DNS1: settings.DNS1, DNS2: settings.DNS2, Interface: iface, BlockAds: settings.BlockAds, DirectRu: settings.DirectRu, DirectDomains: settings.DirectDomains, ProxyDomains: settings.ProxyDomains, DirectApps: settings.DirectApps}
 		if settings.Engine == "xray" {
 			o.XraySOCKSPort = socksPort
 			warnings = append(warnings, "TUN: sing-box; соединение с VPN-сервером: Xray")
@@ -227,7 +251,7 @@ func (a *App) Connect(parent context.Context, nodeID, mode string) (model.AppSta
 			warnings = append(warnings, "sing-box использует встроенный базовый список рекламных доменов")
 		}
 	}
-	if mode == "tun" {
+	if mode == "tun" && !nativeTun {
 		if err := a.waitTunReady(ctx, settings.TestURL); err != nil {
 			return fail(err)
 		}
@@ -244,6 +268,13 @@ func (a *App) Connect(parent context.Context, nodeID, mode string) (model.AppSta
 		if err := EnableSystemProxy(a.dataDir, httpPort, socksPort); err != nil {
 			return fail(err)
 		}
+		if settings.ConsoleProxy {
+			if err := EnableConsoleProxy(a.dataDir, httpPort); err != nil {
+				a.logf("не удалось задать прокси для консольных программ: %v", err)
+			} else {
+				a.logf("прокси для консольных программ: http://127.0.0.1:%d", httpPort)
+			}
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		return fail(err)
@@ -253,6 +284,7 @@ func (a *App) Connect(parent context.Context, nodeID, mode string) (model.AppSta
 	a.socksPort = socksPort
 	a.portMu.Unlock()
 	a.mu.Lock()
+	a.recordConnection()
 	a.state.Connection = model.ConnectionState{Connected: true, NodeID: node.ID, NodeName: node.Name, Mode: mode, Engine: settings.Engine, StartedAt: time.Now(), StatusMessage: "Подключено", Warnings: warnings}
 	if mode == "system-proxy" {
 		a.state.Connection.LocalHTTPProxy = fmt.Sprintf("127.0.0.1:%d", httpPort)

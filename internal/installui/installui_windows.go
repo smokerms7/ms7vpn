@@ -24,6 +24,7 @@ import (
 	"image/draw"
 	"image/png"
 	"runtime"
+	"strings"
 	"sync"
 	"syscall"
 	"unsafe"
@@ -93,6 +94,8 @@ type Request struct {
 	// ValidateDir проверяет выбранную папку. Непустая строка — текст ошибки,
 	// которую увидит человек; дальше мастер не пустит.
 	ValidateDir func(dir string) string
+	// PrepareInstall may hand off installation to another process.
+	PrepareInstall func(owner uintptr, dir string) (handedOff bool, err error)
 }
 
 // Reporter сообщает мастеру о ходе установки. Его можно звать из любой
@@ -469,7 +472,7 @@ func (w *wizard) create() error {
 	w.buildControls(instance)
 
 	if w.request.AutoStart {
-		w.page = pageInstall
+		w.page = pageReady
 		w.applyPage()
 		pShowWindow.Call(handle, swShow)
 		pUpdateWindow.Call(handle)
@@ -778,13 +781,28 @@ func (w *wizard) begin() {
 	if w.started {
 		return
 	}
-	directory := w.selectedDir()
+	directory := strings.TrimSpace(w.selectedDir())
 	if problem := w.checkDir(); problem != "" {
 		pMessageBox.Call(uintptr(w.window),
 			uintptr(unsafe.Pointer(utf16ptr(problem))),
 			uintptr(unsafe.Pointer(utf16ptr("Папка установки"))),
 			mbOK|mbIconWarn)
 		return
+	}
+
+	if w.request.PrepareInstall != nil {
+		handedOff, err := w.request.PrepareInstall(uintptr(w.window), directory)
+		if err != nil {
+			pMessageBox.Call(uintptr(w.window),
+				uintptr(unsafe.Pointer(utf16ptr(err.Error()))),
+				uintptr(unsafe.Pointer(utf16ptr("Папка установки"))),
+				mbOK|mbIconWarn)
+			return
+		}
+		if handedOff {
+			pDestroyWindow.Call(uintptr(w.window))
+			return
+		}
 	}
 
 	w.started = true
@@ -935,8 +953,8 @@ func (w *wizard) paint(window uintptr) {
 			"В какую папку установить "+w.request.Product+"?")
 		w.text(dc, "Программа будет установлена в указанную ниже папку.",
 			w.fontBody, colorInk, 24, 84, winWidth-48, 24, dtLeft|dtSingleLine|dtNoPrefix)
-		w.text(dc, "Если нужна другая папка, нажмите «Обзор». Права администратора "+
-			"не требуются — выбирайте папку внутри своего профиля.",
+		w.text(dc, "Если нужна другая папка, нажмите «Обзор». Для защищённых папок "+
+			"Windows запросит права администратора.",
 			w.fontBody, colorMuted, 24, 154, winWidth-48, 60, dtLeft|dtWordBreak|dtNoPrefix)
 
 	case pageReady:

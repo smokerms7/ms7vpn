@@ -17,6 +17,7 @@ import (
 
 	"ms7vpn/internal/model"
 	"ms7vpn/internal/singbox"
+	"ms7vpn/internal/splitroute"
 	"ms7vpn/internal/store"
 	"ms7vpn/internal/subscription"
 	"ms7vpn/internal/update"
@@ -56,6 +57,10 @@ type App struct {
 	httpPort  int
 	socksPort int
 
+	// Обходные маршруты встроенного TUN Xray (tun_native.go).
+	tunMu     sync.Mutex
+	tunBypass []string
+
 	// Счётчики трафика: клиент локального API Xray.
 	statsMu     sync.Mutex
 	statsClient interface {
@@ -68,6 +73,9 @@ type App struct {
 	// запускался снова и снова уже после отключения.
 	cancelMu      sync.Mutex
 	cancelConnect context.CancelFunc
+
+	// Статистика по дням: трафик, время в VPN, подключения.
+	usage *usageBook
 }
 
 // beginConnect регистрирует текущую попытку подключения и отменяет предыдущую.
@@ -137,6 +145,7 @@ func newApp(dataDir string, recoverNetwork bool) (*App, error) {
 	application := &App{
 		state: state, store: st, fetcher: subscription.NewFetcher(dataDir),
 		dataDir: dataDir, done: make(chan struct{}),
+		usage: loadUsage(dataDir),
 	}
 	application.core = xray.NewManager(dataDir, application.onCoreProgress)
 	application.box = singbox.NewManager(dataDir, application.onCoreProgress)
@@ -156,6 +165,8 @@ func newApp(dataDir string, recoverNetwork bool) (*App, error) {
 		xray.KillOrphans(application.core.CorePath())
 		xray.KillOrphans(application.box.CorePath())
 		_ = RecoverSystemProxy(dataDir)
+		_ = RestoreConsoleProxy(dataDir)
+		RecoverNativeTun(dataDir)
 	}
 	// То же и для «Запрета»: оставшийся winws продолжал бы портить пакеты, а
 	// служба драйвера — держать файл WinDivert64.sys, из-за чего ломаются
@@ -252,7 +263,10 @@ func (a *App) RegisterRoutes(mux *http.ServeMux, token string) {
 	mux.HandleFunc("/api/update/install", withAuth(a.handleInstallUpdate))
 	mux.HandleFunc("/api/update/progress", withAuth(a.handleUpdateProgress))
 	mux.HandleFunc("/api/quit", withAuth(a.handleQuit))
+	mux.HandleFunc("/api/usage", withAuth(a.handleUsage))
+	mux.HandleFunc("/api/settings/reset", withAuth(a.handleResetSettings))
 	a.registerZapretRoutes(mux, withAuth)
+	a.registerExtraRoutes(mux, withAuth)
 }
 
 func (a *App) handleState(w http.ResponseWriter, r *http.Request) {
@@ -309,6 +323,7 @@ func (a *App) handleState(w http.ResponseWriter, r *http.Request) {
 	if dropped {
 		_ = a.stopVPN()
 		_ = RestoreSystemProxy(a.dataDir)
+		_ = RestoreConsoleProxy(a.dataDir)
 	}
 	writeOK(w, state)
 }
@@ -590,92 +605,18 @@ func (a *App) handlePingNodes(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-
-	a.mu.RLock()
-	var targets []model.Node
-	wanted := make(map[string]bool)
-	for _, id := range request.NodeIDs {
-		wanted[id] = true
-	}
-	for _, item := range a.state.Subscriptions {
-		if request.SubscriptionID != "" && item.ID != request.SubscriptionID {
-			continue
+	// Один путь для окна и запасного интерфейса: настоящий пинг через серверы
+	// с откатом на TCP.
+	state, err := a.PingNodes(r.Context(), request.SubscriptionID, request.NodeIDs)
+	if err != nil {
+		status := http.StatusInternalServerError
+		var apiErr *APIError
+		if errors.As(err, &apiErr) && apiErr.Code == "NO_NODES" {
+			status = http.StatusBadRequest
 		}
-		for _, node := range item.Nodes {
-			if len(wanted) == 0 || wanted[node.ID] {
-				targets = append(targets, node)
-			}
-		}
-	}
-	a.mu.RUnlock()
-	if len(targets) == 0 {
-		writeError(w, http.StatusBadRequest, &APIError{Code: "NO_NODES", Message: "Нет серверов для проверки"})
+		writeError(w, status, err)
 		return
 	}
-	if len(targets) > 500 {
-		targets = targets[:500]
-	}
-
-	type result struct {
-		ID     string
-		PingMS int
-		Status string
-	}
-	jobs := make(chan model.Node)
-	results := make(chan result, len(targets))
-	workerCount := 12
-	if len(targets) < workerCount {
-		workerCount = len(targets)
-	}
-	var workers sync.WaitGroup
-	for i := 0; i < workerCount; i++ {
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
-			for node := range jobs {
-				ctx, cancel := context.WithTimeout(r.Context(), 3500*time.Millisecond)
-				duration, err := xray.PingTCP(ctx, node.Address, node.Port, 3*time.Second)
-				cancel()
-				if err != nil {
-					results <- result{ID: node.ID, PingMS: -1, Status: "error"}
-				} else {
-					milliseconds := int(duration.Round(time.Millisecond) / time.Millisecond)
-					if milliseconds < 1 {
-						milliseconds = 1
-					}
-					results <- result{ID: node.ID, PingMS: milliseconds, Status: "ok"}
-				}
-			}
-		}()
-	}
-	go func() {
-		for _, node := range targets {
-			jobs <- node
-		}
-		close(jobs)
-		workers.Wait()
-		close(results)
-	}()
-
-	resultMap := make(map[string]result, len(targets))
-	for item := range results {
-		resultMap[item.ID] = item
-	}
-	now := time.Now()
-	a.mu.Lock()
-	for subIndex := range a.state.Subscriptions {
-		for nodeIndex := range a.state.Subscriptions[subIndex].Nodes {
-			node := &a.state.Subscriptions[subIndex].Nodes[nodeIndex]
-			if item, ok := resultMap[node.ID]; ok {
-				node.PingMS = item.PingMS
-				node.PingStatus = item.Status
-				node.LastPingAt = now
-			}
-		}
-	}
-	_ = a.store.Save(a.state)
-	state := a.state
-	a.mu.Unlock()
 	writeOK(w, state)
 }
 
@@ -763,10 +704,13 @@ func (a *App) Disconnect() (model.AppState, error) {
 	defer a.connectMu.Unlock()
 	coreErr := a.stopVPN()
 	proxyErr := RestoreSystemProxy(a.dataDir)
+	_ = RestoreConsoleProxy(a.dataDir)
 	a.mu.Lock()
 	a.state.Connection = model.ConnectionState{StatusMessage: "Отключено"}
 	state := a.state
 	a.mu.Unlock()
+	a.usage.stopSession()
+	a.usage.maybeSave(true)
 	if coreErr != nil {
 		return state, &APIError{Code: "DISCONNECT_FAILED", Message: coreErr.Error()}
 	}
@@ -800,10 +744,40 @@ func (a *App) handleSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, &APIError{Code: "DISCONNECT_FIRST", Message: "Сначала отключите VPN, затем меняйте режим"})
 		return
 	}
+	consoleChanged := settings.ConsoleProxy != a.state.Settings.ConsoleProxy && connected && a.state.Connection.Mode == "system-proxy"
+	routingChanged := settings.Mode == model.ModeVPN && !modeChanged && tunnelKey(settings) != tunnelKey(a.state.Settings)
 	a.state.Settings = settings
 	_ = a.store.Save(a.state)
 	state := a.state
 	a.mu.Unlock()
+
+	// Прокси для консольных программ включается и выключается сразу.
+	if consoleChanged {
+		a.portMu.Lock()
+		port := a.httpPort
+		a.portMu.Unlock()
+		if settings.ConsoleProxy && port > 0 {
+			_ = EnableConsoleProxy(a.dataDir, port)
+		} else {
+			_ = RestoreConsoleProxy(a.dataDir)
+		}
+	}
+
+	// Правила «Без VPN», DNS и блокировка рекламы зашиты в конфиг ядра.
+	// Чтобы изменения заработали, туннель поднимается заново — сам, без
+	// «отключите и подключите».
+	if connected && routingChanged {
+		a.logf("изменились правила маршрутизации — переподключаюсь")
+		a.asyncWG.Add(1)
+		go func() {
+			defer a.asyncWG.Done()
+			if _, err := a.Connect(context.Background(), "", ""); err != nil {
+				a.logf("не удалось переподключиться после смены правил: %v", err)
+			}
+		}()
+		state.Connection.Connecting = true
+		state.Connection.StatusMessage = "Применяем правила…"
+	}
 
 	// Переключение VPN ⇄ «Запрет» на включённом соединении не требует
 	// «сначала отключите»: это разные способы сделать одно и то же, и человек
@@ -828,6 +802,32 @@ func (a *App) handleSettings(w http.ResponseWriter, r *http.Request) {
 		state.Connection.Connecting = true
 		state.Connection.StatusMessage = "Переключаем режим…"
 	}
+	writeOK(w, state)
+}
+
+// handleResetSettings возвращает настройки по умолчанию. Подписки,
+// избранное и стратегия «Запрета» остаются. На включённом соединении
+// режим, ядро и способ подключения не трогаются — их нельзя менять на ходу.
+func (a *App) handleResetSettings(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, methodError())
+		return
+	}
+	defaults := normalizeSettings(model.DefaultSettings())
+	a.mu.Lock()
+	current := a.state.Settings
+	if a.state.Connection.Connected || a.state.Connection.Connecting {
+		defaults.Mode, defaults.Engine, defaults.ConnectionMode = current.Mode, current.Engine, current.ConnectionMode
+	}
+	a.state.Settings = defaults
+	saveErr := a.store.Save(a.state)
+	state := a.state
+	a.mu.Unlock()
+	if saveErr != nil {
+		writeError(w, http.StatusInternalServerError, saveErr)
+		return
+	}
+	a.logf("настройки сброшены")
 	writeOK(w, state)
 }
 
@@ -982,6 +982,7 @@ func (a *App) Shutdown() {
 		// держала файл драйвера, из-за чего ломаются обновление и удаление.
 		a.pick.stop()
 		a.zapret.Cleanup()
+		a.usage.maybeSave(true)
 		close(a.done)
 	})
 }
@@ -1059,6 +1060,19 @@ func prependUnique(values []string, value string, limit int) []string {
 	return result
 }
 
+// tunnelKey — настройки, которые попадают в конфиг ядра. Их смена на
+// включённом соединении требует переподключения.
+func tunnelKey(s model.Settings) string {
+	list := func(v []string) []string {
+		if v == nil {
+			return []string{}
+		}
+		return v
+	}
+	data, _ := json.Marshal([]any{s.DNS1, s.DNS2, s.BlockAds, s.DirectRu, list(s.DirectDomains), list(s.ProxyDomains), list(s.DirectApps)})
+	return string(data)
+}
+
 // normalizeSettings — единое место, где подставляются значения по умолчанию.
 // Раньше HTTP-обработчик и метод для нативного окна подставляли РАЗНЫЙ режим
 // по умолчанию (system-proxy против tun), и одинаковый ввод давал разный
@@ -1094,6 +1108,22 @@ func normalizeSettings(settings model.Settings) model.Settings {
 	default:
 		settings.Theme = defaults.Theme
 	}
+	switch settings.ServerSort {
+	case model.SortPing, model.SortName, model.SortNone:
+	default:
+		settings.ServerSort = defaults.ServerSort
+	}
+	switch settings.PingMode {
+	case model.PingRealGET, model.PingRealHEAD, model.PingTCP:
+	default:
+		settings.PingMode = defaults.PingMode
+	}
+	if settings.PingTimeoutMS < 1000 || settings.PingTimeoutMS > 15000 {
+		settings.PingTimeoutMS = defaults.PingTimeoutMS
+	}
+	settings.DirectDomains = splitroute.CleanRules(settings.DirectDomains, splitroute.MaxDomains)
+	settings.ProxyDomains = splitroute.CleanRules(settings.ProxyDomains, splitroute.MaxDomains)
+	settings.DirectApps = splitroute.CleanApps(settings.DirectApps, splitroute.MaxApps)
 	return settings
 }
 

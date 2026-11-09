@@ -36,3 +36,8 @@ TUN mode uses the official signed Wintun DLL. Wintun's downloadable prebuilt pac
   `strategies.json`, поле `source`.
 
 Тексты лицензий лежат рядом с файлами: `resources/zapret/licenses/`.
+
+## simple-icons
+
+Значки популярных программ в разделе «Без VPN» (internal/webui/assets/appicons.js) — пути из simple-icons 16.31.0, https://simpleicons.org, лицензия CC0-1.0. Товарные знаки принадлежат их владельцам.
+

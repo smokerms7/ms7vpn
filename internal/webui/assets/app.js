@@ -172,6 +172,22 @@
     return list;
   }
 
+  // Имя сервера: своё, если человек переименовал, иначе из подписки.
+  function nodeName(node) {
+    const custom = state && state.nodeNames && state.nodeNames[node.id];
+    return custom || flags.cleanName(node.name);
+  }
+
+  // Активная подписка: выбранная человеком, иначе подписка выбранного
+  // сервера, иначе первая.
+  function activeSubId() {
+    const subs = (state && state.subscriptions) || [];
+    if (!subs.length) return '';
+    if (subs.some((s) => s.id === state.selectedSubscriptionId)) return state.selectedSubscriptionId;
+    const node = allNodes().find((n) => n.id === state.selectedNodeId);
+    return node ? node.subId : subs[0].id;
+  }
+
   function findNode(id) {
     return allNodes().find((node) => node.id === id) || null;
   }
@@ -214,6 +230,15 @@
     return (bytes / (1024 * 1024)).toFixed(0) + ' МБ';
   }
 
+  // Коротко для главной: сегодня — только время, иначе день и месяц.
+  function shortDate(value) {
+    const time = Date.parse(value || '');
+    if (!time || Number.isNaN(time)) return '—';
+    const date = new Date(time);
+    if (date.toDateString() === new Date().toDateString()) return 'в ' + date.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+    return date.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' });
+  }
+
   function formatDate(value) {
     const time = Date.parse(value || '');
     if (!time || Number.isNaN(time)) return '—';
@@ -235,37 +260,67 @@
     $('status-text').textContent = connected ? 'Подключено' : connecting ? 'Подключение…' : 'Отключено';
 
     const power = $('power-btn');
-    power.className = 'power' + (connected ? ' is-on' : connecting ? ' is-wait' : '');
-    power.disabled = connecting;
-    $('power-label').textContent = connected ? 'ОТКЛЮЧИТЬ' : connecting ? 'ПОДКЛЮЧЕНИЕ…' : 'ПОДКЛЮЧИТЬ';
+    power.setAttribute('aria-label', connected ? 'Отключить' : connecting ? 'Отменить подключение' : 'Подключить');
+    // Кнопка не гасится во время подключения: нажатие отменяет его.
+    setText($('power-label'), connected ? 'Отключить' : connecting ? 'Подключение…' : fastestRunning ? 'Поиск…' : 'Подключить');
+    setText($('power-state'), connected ? 'Подключено' : connecting ? 'Подключение' : 'Отключено');
+    const stage = $('power-stage');
+    stage.classList.toggle('is-on', connected);
+    stage.classList.toggle('is-wait', connecting || fastestRunning);
+    $('shell').classList.toggle('is-on', connected);
+    // Короткая вспышка кольца в момент подключения.
+    if (connected && !wasConnected) {
+      const burst = $('power-burst');
+      burst.classList.remove('go');
+      void burst.offsetWidth;
+      burst.classList.add('go');
+      speedHistory.length = 0;
+    }
+    wasConnected = connected;
 
     const selected = findNode(state.selectedNodeId);
-    $('chip-name').textContent = selected ? flags.cleanName(selected.name) : 'Сервер не выбран';
-    $('chip-flag').innerHTML = selected ? flags.flagHTML(selected.name) : '';
-
-    renderSpeed(connection, connected);
-
-    const stats = $('home-stats');
-    stats.hidden = !connected;
-    if (connected) {
-      setText($('stat-mode'), connection.mode === 'tun' ? 'TUN — весь трафик' : 'Системный прокси');
+    setText($('chip-name'), selected ? nodeName(selected) : ((state.subscriptions || []).length ? 'Выберите сервер' : 'Добавьте подписку'));
+    const chipFlagName = selected ? selected.name : '';
+    if ($('chip-flag').dataset.name !== chipFlagName) {
+      $('chip-flag').dataset.name = chipFlagName;
+      $('chip-flag').innerHTML = selected ? flags.flagHTML(selected.name) : '';
+    }
+    const chipPing = $('chip-ping');
+    const livePing = connected ? connection.pingMs : 0;
+    const shownPing = livePing > 0 ? livePing : (selected && selected.pingStatus === 'ok' ? selected.pingMs : 0);
+    chipPing.hidden = !shownPing;
+    if (shownPing) {
+      setText(chipPing, shownPing + ' мс');
+      chipPing.className = 'chip-ping ' + pingClass({ pingMs: shownPing, pingStatus: 'ok' });
     }
 
-    const notice = $('home-notice');
+    renderSpeed(connection, connected);
+    renderGreeting(connected, connecting, selected);
+    renderQuick();
+
+
     const problem = connection.lastError || (state.core && state.core.lastError) || '';
+    // Строка под кнопкой, как у Shade: что происходит прямо сейчас.
+    const subtxt = $('home-subtxt');
+    let line;
+    // Подключено — строка не нужна: сервер виден на плашке ниже, статус на кнопке.
+    if (connected) line = isZapret() ? 'Обход блокировок работает — трафик идёт напрямую' : '';
+    else if (connecting) line = connection.statusMessage || 'Подключаемся…';
+    else if (problem) line = problem;
+    else if (isZapret()) line = 'Обход DPI без сервера: пинг родной, подписка не тратится';
+    else if (!(state.subscriptions || []).length) line = 'Добавьте подписку — Ctrl+V с ссылкой в буфере';
+    else line = 'Нажмите, чтобы подключиться';
+    setText(subtxt, line);
+    subtxt.hidden = !line;
+    subtxt.className = 'subtxt' + (connected ? ' is-on' : !connecting && problem ? ' is-err' : '');
+
+    const notice = $('home-notice');
     const warning = (connection.warnings || []).join('\n');
-    const info = connecting ? (connection.statusMessage || '') : '';
     notice.className = 'notice';
-    if (problem) {
-      notice.hidden = false;
-      notice.textContent = problem;
-    } else if (warning) {
+    if (warning) {
       notice.hidden = false;
       notice.className = 'notice is-warn';
       notice.textContent = warning;
-    } else if (info) {
-      notice.hidden = false;
-      notice.textContent = info;
     } else {
       notice.hidden = true;
     }
@@ -276,6 +331,7 @@
     renderZapret();
     renderSubs();
     renderSettings();
+    renderSplit(false);
     renderInfo();
     updateTimer();
   }
@@ -299,6 +355,9 @@
         <span class="row-sub"></span>
       </span>
       <span class="ping"></span>
+      <button type="button" class="srv-info-btn" data-info="${escapeHtml(node.id)}" aria-label="О сервере" title="О сервере и переименование">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg>
+      </button>
       <button type="button" class="star" data-fav="${escapeHtml(node.id)}" aria-label="В избранное">
         <svg viewBox="0 0 24 24"><path d="M12 3.6l2.6 5.3 5.8.8-4.2 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8L3.6 9.7l5.8-.8z"/></svg>
       </button>`;
@@ -316,7 +375,7 @@
       flagSlot.dataset.name = node.name;
       flagSlot.innerHTML = flagHTML;
     }
-    setText(row.querySelector('.row-title'), flags.cleanName(node.name));
+    setText(row.querySelector('.row-title'), nodeName(node));
     setText(row.querySelector('.row-sub'), node.supported ? nodeMeta(node) : (node.unsupportedReason || 'Не поддерживается'));
 
     const ping = row.querySelector('.ping');
@@ -334,14 +393,21 @@
     const favorites = state.favorites || {};
     const needle = search.trim().toLowerCase();
 
-    const visible = allNodes().filter((node) => !needle || (node.name || '').toLowerCase().includes(needle));
+    const order = (state.settings || {}).serverSort || 'ping';
+    const activeId = activeSubId();
+    const visible = allNodes()
+      .filter((node) => !activeId || node.subId === activeId)
+      .map((node, index) => Object.assign(node, { order: index }))
+      .filter((node) => !needle || (node.name || '').toLowerCase().includes(needle));
     visible.sort((a, b) => {
       const favDiff = (favorites[b.id] ? 1 : 0) - (favorites[a.id] ? 1 : 0);
       if (favDiff) return favDiff;
+      if (order === 'none') return a.order - b.order;
+      if (order === 'name') return nodeName(a).localeCompare(nodeName(b), 'ru');
       const aPing = a.pingStatus === 'ok' ? a.pingMs : 99999;
       const bPing = b.pingStatus === 'ok' ? b.pingMs : 99999;
       if (aPing !== bPing) return aPing - bPing;
-      return (a.name || '').localeCompare(b.name || '', 'ru');
+      return a.order - b.order;
     });
 
     $('servers-empty').hidden = visible.length > 0;
@@ -389,11 +455,171 @@
   function renderSpeed(connection, connected) {
     const down = $('speed-down');
     const up = $('speed-up');
-    const downHTML = formatSpeed(connected ? connection.downlinkBitsSec : 0);
-    const upHTML = formatSpeed(connected ? connection.uplinkBitsSec : 0);
+    const downHTML = compactSpeed(connected ? connection.downlinkBitsSec : 0);
+    const upHTML = compactSpeed(connected ? connection.uplinkBitsSec : 0);
     if (down.innerHTML !== downHTML) down.innerHTML = downHTML;
     if (up.innerHTML !== upHTML) up.innerHTML = upHTML;
     $('speed-row').classList.toggle('is-idle', !connected);
+
+    // Пинг через туннель: меряется программой раз в несколько секунд.
+    const ping = $('stat-ping');
+    const ms = connected ? Number(connection.pingMs) || 0 : 0;
+    const pingHTML = ms > 0 ? ms + '<small>мс</small>' : ms < 0 ? '×' : '—';
+    if (ping.innerHTML !== pingHTML) ping.innerHTML = pingHTML;
+    ping.classList.toggle('is-bad', ms < 0 || ms > 300);
+
+  }
+
+  // Скорость для узкой плитки под кнопкой: число и короткая единица.
+  function compactSpeed(bitsPerSecond) {
+    const bits = Math.max(0, Number(bitsPerSecond) || 0);
+    const mbit = bits / 1e6;
+    if (mbit >= 100) return Math.round(mbit) + '<small>Мб/с</small>';
+    if (mbit >= 1) return mbit.toFixed(1).replace('.', ',') + '<small>Мб/с</small>';
+    if (bits >= 1e3) return Math.round(bits / 1e3) + '<small>Кб/с</small>';
+    return '0,0<small>Мб/с</small>';
+  }
+
+  // Длительность сессии как у Shade: 05:12 или 1:05:12.
+  function shortUptime(startedAt) {
+    const started = Date.parse(startedAt || '');
+    if (!started || Number.isNaN(started)) return '00:00';
+    const total = Math.max(0, Math.floor((Date.now() - started) / 1000));
+    const pad = (n) => String(n).padStart(2, '0');
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const s = total % 60;
+    return h > 0 ? h + ':' + pad(m) + ':' + pad(s) : pad(m) + ':' + pad(s);
+  }
+
+  function formatTraffic(value) {
+    const bytes = Number(value) || 0;
+    if (bytes >= 1024 ** 3) return (bytes / 1024 ** 3).toFixed(2).replace('.', ',') + ' ГБ';
+    if (bytes >= 1024 ** 2) return (bytes / 1024 ** 2).toFixed(bytes >= 100 * 1024 ** 2 ? 0 : 1).replace('.', ',') + ' МБ';
+    if (bytes > 0) return Math.max(1, Math.round(bytes / 1024)) + ' КБ';
+    return '0 МБ';
+  }
+
+  /* ==== график скорости ====
+     Точки берутся из того же опроса состояния. Холст перерисовывается
+     только когда пришла новая точка или изменился размер. */
+  const speedHistory = [];
+  const HISTORY_POINTS = 90;
+  let wasConnected = false;
+  let fastestRunning = false;
+
+  function pushSpeedSample() {
+    const connection = (state && state.connection) || {};
+    if (!connection.connected) return;
+    speedHistory.push({ down: Number(connection.downlinkBitsSec) || 0, up: Number(connection.uplinkBitsSec) || 0 });
+    if (speedHistory.length > HISTORY_POINTS) speedHistory.shift();
+    drawChart();
+  }
+
+  function cssVar(name, fallback) {
+    const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    return value || fallback;
+  }
+
+  function drawChart() {
+    const canvas = $('speed-chart');
+    if (!canvas || !canvas.offsetParent) return;
+    const ratio = window.devicePixelRatio || 1;
+    const width = canvas.clientWidth;
+    const height = canvas.clientHeight;
+    if (!width || !height) return;
+    if (canvas.width !== Math.round(width * ratio) || canvas.height !== Math.round(height * ratio)) {
+      canvas.width = Math.round(width * ratio);
+      canvas.height = Math.round(height * ratio);
+    }
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+    ctx.clearRect(0, 0, width, height);
+
+    // Сетка — три тонкие линии, чтобы было на что опереться глазу.
+    ctx.strokeStyle = cssVar('--track', 'rgba(255,255,255,0.07)');
+    ctx.lineWidth = 1;
+    for (let i = 1; i <= 3; i++) {
+      const y = Math.round((height / 4) * i) + 0.5;
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke();
+    }
+
+    const points = speedHistory;
+    if (points.length < 2) {
+      ctx.fillStyle = cssVar('--muted', '#9A90AD');
+      ctx.font = '12px "Segoe UI", sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(state && state.connection && state.connection.connected ? 'Собираем данные…' : 'График появится после подключения', width / 2, height / 2 + 4);
+      return;
+    }
+    const max = Math.max(1e6, ...points.map((p) => Math.max(p.down, p.up))) * 1.15;
+    const step = width / (HISTORY_POINTS - 1);
+    const offset = (HISTORY_POINTS - points.length) * step;
+    const plot = (key, color, fill) => {
+      ctx.beginPath();
+      points.forEach((p, i) => {
+        const x = offset + i * step;
+        const y = height - (p[key] / max) * (height - 4) - 2;
+        if (i === 0) ctx.moveTo(x, y);
+        else {
+          const px = offset + (i - 1) * step;
+          const py = height - (points[i - 1][key] / max) * (height - 4) - 2;
+          const cx = (px + x) / 2;
+          ctx.bezierCurveTo(cx, py, cx, y, x, y);
+        }
+      });
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.lineJoin = 'round';
+      ctx.stroke();
+      if (fill) {
+        ctx.lineTo(offset + (points.length - 1) * step, height);
+        ctx.lineTo(offset, height);
+        ctx.closePath();
+        const gradient = ctx.createLinearGradient(0, 0, 0, height);
+        gradient.addColorStop(0, color + '55');
+        gradient.addColorStop(1, color + '00');
+        ctx.fillStyle = gradient;
+        ctx.fill();
+      }
+    };
+    plot('up', cssVar('--chart-up', '#B026FF'), false);
+    plot('down', cssVar('--chart-down', '#35D07F'), true);
+
+    // Подпись максимума в углу.
+    ctx.fillStyle = cssVar('--muted', '#9A90AD');
+    ctx.font = '10px "Segoe UI", sans-serif';
+    ctx.textAlign = 'right';
+    ctx.fillText(formatSpeed(max / 1.15).replace(/<small>(.*)<\/small>/, ' $1'), width - 2, 10);
+  }
+  window.addEventListener('resize', () => drawChart());
+
+  /* ==== приветствие ==== */
+  function renderGreeting(connected, connecting, selected) {
+    const hour = new Date().getHours();
+    const title = hour < 5 ? 'Доброй ночи' : hour < 12 ? 'Доброе утро' : hour < 18 ? 'Добрый день' : 'Добрый вечер';
+    setText($('greet-title'), title + ' 👋');
+    let sub;
+    if (isZapret()) {
+      sub = connected ? 'Обход блокировок работает — трафик идёт напрямую' : 'Режим «Запрет»: обход без сервера';
+    } else if (connected) {
+      const where = selected ? nodeName(selected) : 'сервер';
+      sub = 'Соединение защищено · ' + where;
+    } else if (connecting) {
+      sub = 'Подключаемся…';
+    } else if (!(state.subscriptions || []).length) {
+      sub = 'Добавьте подписку — нажмите Ctrl+V с ссылкой в буфере';
+    } else {
+      sub = 'Нажмите кнопку, чтобы подключиться';
+    }
+    setText($('greet-sub'), sub);
+  }
+
+  /* ==== быстрые действия и «Без VPN» на главной ==== */
+  function renderQuick() {
+    const settings = state.settings || {};
+    const on = !!settings.directRu || (settings.directDomains || []).length > 0 || (settings.directApps || []).length > 0;
+    $('nav-split-badge').hidden = !on;
   }
 
   // Статус подписки. Возвращает null, если панель не прислала ничего,
@@ -422,7 +648,7 @@
     const card = $('home-sub-card');
     const subs = state.subscriptions || [];
     const selected = findNode(state.selectedNodeId);
-    const current = subs.find((sub) => sub.id === (selected ? selected.subId : state.selectedSubscriptionId)) || subs[0];
+    const current = subs.find((sub) => sub.id === activeSubId()) || subs[0];
     if (!current) {
       card.hidden = true;
       return;
@@ -438,12 +664,22 @@
     // Ниже показывается ТОЛЬКО то, что действительно прислала панель.
     // Ничего не достраивается: нет срока — нет строки, нет лимита — нет полосы.
     const expireRow = $('home-sub-expire-row');
+    const daysBox = $('home-sub-days');
     if (info.expireUnix) {
       expireRow.hidden = false;
       setText($('home-sub-expire'),
         new Date(info.expireUnix * 1000).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short', year: 'numeric' }));
+      // Кружок с днями: полный — месяц и больше, дальше убывает.
+      const daysLeft = Math.max(0, Math.ceil((info.expireUnix * 1000 - Date.now()) / 86400000));
+      daysBox.hidden = false;
+      const daysHTML = (daysLeft > 999 ? '∞' : daysLeft) + '<small>' + plural(daysLeft, 'день', 'дня', 'дней') + '</small>';
+      if ($('home-sub-days-num').innerHTML !== daysHTML) $('home-sub-days-num').innerHTML = daysHTML;
+      const share = Math.min(1, daysLeft / 30);
+      $('home-sub-days-fill').style.strokeDashoffset = String(97.4 * (1 - share));
+      daysBox.className = 'sub-days' + (daysLeft <= 3 ? ' is-danger' : daysLeft <= 7 ? ' is-warn' : '');
     } else {
       expireRow.hidden = true;
+      daysBox.hidden = true;
     }
 
     const badge = $('home-sub-status');
@@ -478,24 +714,35 @@
       setText($('home-sub-left'), 'без ограничений');
     }
 
+    const warn = $('home-sub-warn');
+    warn.hidden = !current.lastError;
+    if (current.lastError) setText(warn, '⚠ ' + current.lastError);
+    if (/лимит устройств/i.test(current.lastError || '')) {
+      setText(badge, 'Лимит устройств');
+      badge.hidden = false;
+      badge.className = 'badge is-warn';
+    }
+
     const count = (current.nodes || []).length;
     setText($('home-sub-hint'),
-      `${count} ${plural(count, 'сервер', 'сервера', 'серверов')} · обновлено ${formatDate(current.updatedAt)}`);
+      `${count} ${plural(count, 'сервер', 'сервера', 'серверов')} · обновлено ${shortDate(current.updatedAt)}`);
   }
 
   function renderSubs() {
     const list = $('sub-list');
     const subs = state.subscriptions || [];
     $('subs-empty').hidden = subs.length > 0;
+    const activeId = activeSubId();
     list.innerHTML = subs.map((sub) => {
       const info = sub.userInfo || {};
       const used = (info.uploadBytes || 0) + (info.downloadBytes || 0);
       const traffic = info.totalBytes ? `${formatBytes(used)} из ${formatBytes(info.totalBytes)}` : formatBytes(used) + ' использовано';
       const expire = info.expireUnix ? ' · до ' + new Date(info.expireUnix * 1000).toLocaleDateString('ru-RU') : '';
       return `
-      <div class="row-item${sub.id === state.selectedSubscriptionId ? ' is-selected' : ''}" data-sub="${escapeHtml(sub.id)}">
+      <div class="row-item sub-row-item${sub.id === activeId ? ' is-selected' : ''}" data-sub="${escapeHtml(sub.id)}" data-sub-select="${escapeHtml(sub.id)}" title="${sub.id === activeId ? 'Активная подписка' : 'Нажмите, чтобы сделать активной'}">
+        <span class="sub-radio${sub.id === activeId ? ' is-on' : ''}"></span>
         <span class="row-main">
-          <span class="row-title">${escapeHtml(sub.name || 'Подписка')}</span>
+          <span class="row-title">${escapeHtml(sub.name || 'Подписка')}${sub.id === activeId ? '<span class="sub-active-tag">активна</span>' : ''}</span>
           <span class="row-sub">${(sub.nodes || []).length} серверов · обновлено ${escapeHtml(formatDate(sub.updatedAt))}</span>
           <span class="row-sub">${escapeHtml(traffic + expire)}</span>
           ${sub.lastError ? `<span class="row-sub" style="color:#FFB3BE">${escapeHtml(sub.lastError)}</span>` : ''}
@@ -518,8 +765,12 @@
     $('set-dns1').value = settings.dns1 || '';
     $('set-dns2').value = settings.dns2 || '';
     $('set-testurl').value = settings.testUrl || '';
-    $('set-support').value = settings.supportUrl || '';
-    $('set-update').value = settings.updateUrl || '';
+    $('set-pingmode').value = settings.pingMode || 'real-get';
+    $('set-pingtimeout').value = String(settings.pingTimeoutMs || 5000);
+    $('set-consoleproxy').checked = !!settings.consoleProxy;
+    $('set-autoping').checked = !!settings.autoPing;
+    $('set-sort').value = settings.serverSort || 'ping';
+    renderDnsChips();
     if (!themeTouched) applyTheme(settings.theme);
     renderZapretSettings();
   }
@@ -644,15 +895,66 @@
     }
   }
 
-  async function connect(nodeId) {
+  // Анимация подключения: кнопка сразу переходит в «Подключение», дуга
+  // крутится, а результат показывается не раньше чем через MIN_CONNECT_MS.
+  // Раньше окно не перерисовывалось, пока шёл запрос, и быстрое подключение
+  // выглядело как мгновенный щелчок без всякой анимации.
+  const MIN_CONNECT_MS = 1400;
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  function showPending(message) {
+    state.connection = Object.assign({}, state.connection, {
+      connecting: true, connected: false, lastError: '', statusMessage: message
+    });
+    render();
+  }
+
+  // Выбор подписки нажатием. Если VPN включён на сервере другой подписки —
+  // переподключаемся на сервер выбранной.
+  async function selectSubscription(id) {
+    if (!id || id === activeSubId()) return;
+    const wasConnected = !!(state.connection || {}).connected;
+    const before = state.selectedNodeId;
     await guard(async () => {
-      state = await api('/api/connect', { method: 'POST', body: { nodeId: nodeId || state.selectedNodeId || '', mode: '' } });
+      state = await api('/api/subscriptions/select', { method: 'POST', body: { id } });
+      const sub = (state.subscriptions || []).find((s) => s.id === id);
+      toast('Активная подписка: ' + ((sub && sub.name) || 'Подписка'), 'ok');
+    });
+    if (wasConnected && state.selectedNodeId && state.selectedNodeId !== before) connect(state.selectedNodeId);
+  }
+
+  async function connect(nodeId) {
+    if (!state) return;
+    await guard(async () => {
+      const started = Date.now();
+      showPending(isZapret() ? 'Включаем обход…' : 'Подключаемся…');
+      let result;
+      let failure;
+      try {
+        result = await api('/api/connect', { method: 'POST', body: { nodeId: nodeId || state.selectedNodeId || '', mode: '' } });
+      } catch (error) {
+        failure = error;
+      }
+      await wait(Math.max(0, MIN_CONNECT_MS - (Date.now() - started)));
+      if (failure) {
+        // Состояние после ошибки — с сервера, иначе кнопка осталась бы
+        // в «Подключение».
+        try { state = await api('/api/state'); } catch (_) { /* покажем как есть */ }
+        throw failure;
+      }
+      state = result;
     });
   }
 
   async function disconnect() {
     await guard(async () => {
-      state = await api('/api/disconnect', { method: 'POST', body: {} });
+      const started = Date.now();
+      state.connection = Object.assign({}, state.connection, { statusMessage: 'Отключаемся…' });
+      $('power-stage').classList.add('is-wait');
+      setText($('power-label'), 'Отключение…');
+      const result = await api('/api/disconnect', { method: 'POST', body: {} });
+      await wait(Math.max(0, 600 - (Date.now() - started)));
+      state = result;
     });
   }
 
@@ -666,6 +968,10 @@
         section.classList.toggle('is-active', section.id === 'page-' + page);
       });
       if (page === 'log') loadLog();
+      if (page === 'stats') loadUsage();
+      if (page === 'split') renderSplit(true);
+      if (page === 'home') requestAnimationFrame(drawChart);
+      currentPage = page;
     });
   });
 
@@ -675,8 +981,59 @@
   };
   $('server-chip').addEventListener('click', () => openPage('servers'));
 
+  // Удержание кнопки секунду — подключиться к самому быстрому серверу.
+  // Кольцо начинает заполняться через 150 мс, чтобы обычный щелчок не
+  // мигал дугой.
+  const HOLD_DELAY = 150;
+  const HOLD_MS = 1000;
+  let holdTimers = [];
+  let holdFired = false;
+
+  function clearHold() {
+    holdTimers.forEach((id) => clearTimeout(id));
+    holdTimers = [];
+    $('power-stage').classList.remove('is-holding');
+  }
+
+  function canHold() {
+    return state && !isZapret() && !state.connection.connected && !state.connection.connecting && !fastestRunning && allNodes().some((n) => n.supported);
+  }
+
+  $('power-btn').addEventListener('pointerdown', (event) => {
+    holdFired = false;
+    if (event.button !== 0 || !canHold()) return;
+    clearHold();
+    holdTimers.push(
+      setTimeout(() => $('power-stage').classList.add('is-holding'), HOLD_DELAY),
+      setTimeout(() => {
+        holdFired = true;
+        clearHold();
+        fastest(true);
+      }, HOLD_MS)
+    );
+  });
+  ['pointerup', 'pointerleave', 'pointercancel'].forEach((name) => $('power-btn').addEventListener(name, clearHold));
+
   $('power-btn').addEventListener('click', () => {
+    if (holdFired) { holdFired = false; return; }
+    togglePower();
+  });
+
+  // Нажатие во время подключения отменяет его. Идём мимо guard: тот занят
+  // ожиданием самого подключения.
+  async function cancelConnect() {
+    try {
+      state = await api('/api/disconnect', { method: 'POST', body: {} });
+      toast('Подключение отменено');
+    } catch (error) {
+      toast(error.message, 'err');
+    }
+    render();
+  }
+
+  function togglePower() {
     if (!state) return;
+    if (state.connection.connecting) { cancelConnect(); return; }
     if (state.connection.connected) { disconnect(); return; }
     // Режим VPN без единой подписки подключать не к чему. Раньше запрос
     // уходил на сервер и возвращался технической ошибкой.
@@ -695,8 +1052,69 @@
       openStrategyModal(true);
       return;
     }
+    // Сервер не выбран — сразу ищем самый быстрый, а не ругаемся.
+    if (!isZapret() && !findNode(state.selectedNodeId)) {
+      fastest(true);
+      return;
+    }
     connect('');
+  }
+
+  // Самый быстрый сервер: пинг всех серверов, выбор лучшего, подключение.
+  async function fastest(connectAfter) {
+    if (fastestRunning || !state) return;
+    if (!(state.subscriptions || []).length) {
+      toast('Сначала добавьте подписку', 'err');
+      openPage('subs');
+      return;
+    }
+    fastestRunning = true;
+    toast('Ищем самый быстрый сервер…');
+    render();
+    let best = null;
+    try {
+      state = await api('/api/nodes/ping', { method: 'POST', body: { subscriptionId: '', nodeIds: [] } });
+      const engine = (state.settings || {}).engine || 'xray';
+      const activeId = activeSubId();
+      const candidates = allNodes().filter((n) => (!activeId || n.subId === activeId) && n.supported && n.pingStatus === 'ok' && n.pingMs > 0 &&
+        !(engine === 'xray' && n.protocol === 'hysteria2'));
+      candidates.sort((a, b) => a.pingMs - b.pingMs);
+      best = candidates[0] || null;
+      if (!best) {
+        toast('Ни один сервер не ответил', 'err');
+        return;
+      }
+      state = await api('/api/nodes/select', { method: 'POST', body: { nodeId: best.id } });
+      toast('Самый быстрый: ' + nodeName(best) + ' · ' + best.pingMs + ' мс', 'ok');
+    } catch (error) {
+      toast(error.message, 'err');
+      return;
+    } finally {
+      fastestRunning = false;
+      render();
+    }
+    // Уже подключены к другому серверу — переключаемся на найденный.
+    const current = state.connection || {};
+    if (connectAfter && best && !(current.connected && current.nodeId === best.id)) connect(best.id);
+  }
+
+  $('fastest-btn').addEventListener('click', () => fastest(false));
+  // Переключатель VPN / Запрет на главной.
+  $('home-mode').addEventListener('click', (event) => {
+    const button = event.target.closest('[data-home-mode]');
+    if (!button || !state || button.dataset.homeMode === appMode) return;
+    if (((state.zapret || {}).pick || {}).running) {
+      toast('Дождитесь окончания подбора стратегии', 'err');
+      return;
+    }
+    const next = button.dataset.homeMode;
+    guard(async () => {
+      state = await api('/api/settings', { method: 'POST', body: Object.assign({}, state.settings, { mode: next }) });
+      toast(next === 'zapret' ? 'Режим «Запрет»' : 'Режим VPN', 'ok');
+    });
   });
+
+  $('zapret-strategy-tile').addEventListener('click', () => openStrategyModal(false));
 
   $('servers-add-sub').addEventListener('click', () => openPage('subs'));
 
@@ -706,6 +1124,12 @@
   });
 
   $('server-list').addEventListener('click', (event) => {
+    const infoBtn = event.target.closest('[data-info]');
+    if (infoBtn) {
+      event.stopPropagation();
+      openServerModal(infoBtn.dataset.info);
+      return;
+    }
     const fav = event.target.closest('[data-fav]');
     if (fav) {
       event.stopPropagation();
@@ -794,6 +1218,11 @@
       return;
     }
     const deleteBtn = event.target.closest('[data-sub-delete]');
+    const row = event.target.closest('[data-sub-select]');
+    if (!deleteBtn && row && !event.target.closest('button')) {
+      selectSubscription(row.dataset.subSelect);
+      return;
+    }
     if (deleteBtn) {
       guard(async () => {
         state = await api('/api/subscriptions/delete', { method: 'POST', body: { id: deleteBtn.dataset.subDelete } });
@@ -803,9 +1232,13 @@
   });
 
   $('settings-save').addEventListener('click', () => guard(async () => {
+    // Поля, которых нет на этой странице («Без VPN»), берутся из текущих
+    // настроек: пропущенное поле программа поняла бы как «выключить».
     state = await api('/api/settings', {
       method: 'POST',
-      body: {
+      body: Object.assign({}, state.settings, {
+        autoPing: $('set-autoping').checked,
+        serverSort: $('set-sort').value,
         mode: appMode,
         connectionMode: $('set-mode').value,
         engine: $('set-engine').value,
@@ -818,10 +1251,11 @@
         dns1: $('set-dns1').value.trim(),
         dns2: $('set-dns2').value.trim(),
         testUrl: $('set-testurl').value.trim(),
-        supportUrl: $('set-support').value.trim(),
-        updateUrl: $('set-update').value.trim(),
+        pingMode: $('set-pingmode').value,
+        pingTimeoutMs: Number($('set-pingtimeout').value) || 5000,
+        consoleProxy: $('set-consoleproxy').checked,
         theme
-      }
+      })
     });
     themeTouched = false;
     toast('Настройки сохранены', 'ok');
@@ -1044,13 +1478,18 @@
     $('server-chip').hidden = isZapret();
     $('speed-row').hidden = isZapret();
     $('zapret-row').hidden = !isZapret();
+    const seg = $('home-mode');
+    seg.classList.toggle('is-zapret', isZapret());
+    for (const button of seg.querySelectorAll('[data-home-mode]')) {
+      button.setAttribute('aria-checked', String(button.dataset.homeMode === appMode));
+    }
+    seg.hidden = !zapret.available && !isZapret();
     if (isZapret()) {
       $('home-sub-card').hidden = true;
       setText($('zapret-strategy'), zapret.strategyName || '—');
-      setText($('power-label'), on ? 'ВЫКЛЮЧИТЬ' : connection.connecting ? 'ВКЛЮЧЕНИЕ…' : 'ВКЛЮЧИТЬ');
+      setText($('power-label'), on ? 'Выключить' : connection.connecting ? 'Включение…' : 'Включить');
       setText($('status-text'), on ? 'Включено' : connection.connecting ? 'Включение…' : 'Выключено');
-      $('home-stats').hidden = !on;
-      if (on) setText($('stat-mode'), 'Запрет — без сервера');
+      setText($('power-state'), on ? 'Запрет включён' : connection.connecting ? 'Включение' : 'Запрет выключен');
     }
     renderPickProgress();
   }
@@ -1272,12 +1711,522 @@
     }
   }
 
+  /* ==================== «Без VPN» ==================== */
+
+  let currentPage = 'home';
+  $('split-hero-flag').innerHTML = flags.flagHTML('Россия');
+  let splitDirty = false;
+
+  const linesOf = (text) => text.split(/[\r\n,;]+/).map((s) => s.trim()).filter(Boolean);
+
+  function renderSplit(force) {
+    if (!state) return;
+    const settings = state.settings || {};
+    // Пока человек правит списки, опрос состояния их не перетирает.
+    if (!force && splitDirty) return;
+    // Не трогаем поле, в котором стоит курсор.
+    const active = document.activeElement;
+    if (!force && active && active.closest && active.closest('#page-split')) return;
+    $('split-ru').checked = !!settings.directRu;
+    $('split-direct').value = (settings.directDomains || []).join('\n');
+    $('split-proxy').value = (settings.proxyDomains || []).join('\n');
+    $('split-apps').value = (settings.directApps || []).join('\n');
+    splitDirty = false;
+    renderSplitCounts();
+    renderPopularApps();
+  }
+
+  function renderSplitCounts() {
+    const count = (id) => linesOf($(id).value).length;
+    setText($('split-direct-count'), String(count('split-direct')));
+    setText($('split-proxy-count'), String(count('split-proxy')));
+    setText($('split-apps-count'), String(count('split-apps')));
+    $('split-hero').classList.toggle('is-on', $('split-ru').checked);
+    const settings = (state && state.settings) || {};
+    const tun = settings.connectionMode === 'tun';
+    const note = $('split-apps-note');
+    setText(note, tun ? 'Работает в режиме TUN' : 'Только в режиме TUN — сейчас системный прокси');
+    note.className = 'split-note' + (tun ? '' : ' is-warn');
+  }
+
+  ['split-direct', 'split-proxy', 'split-apps'].forEach((id) => {
+    $(id).addEventListener('input', () => { splitDirty = true; renderSplitCounts(); });
+  });
+  $('split-ru').addEventListener('change', () => { splitDirty = true; renderSplitCounts(); });
+
+  $('split-save').addEventListener('click', () => guard(async () => {
+    state = await api('/api/settings', {
+      method: 'POST',
+      body: Object.assign({}, state.settings, {
+        directRu: $('split-ru').checked,
+        directDomains: linesOf($('split-direct').value),
+        proxyDomains: linesOf($('split-proxy').value),
+        directApps: linesOf($('split-apps').value)
+      })
+    });
+    splitDirty = false;
+    renderSplit(true);
+    toast(state.connection.connecting ? 'Сохранено — переподключаемся с новыми правилами' : 'Правила сохранены', 'ok');
+  }));
+
+  /* ==================== статистика ==================== */
+
+  let usage = null;
+
+  async function loadUsage() {
+    try {
+      usage = await api('/api/usage');
+      renderUsage();
+    } catch (_) {
+      // Статистика — украшение: без неё всё остальное работает.
+    }
+  }
+
+  function formatDuration(seconds) {
+    const total = Math.max(0, Math.floor(Number(seconds) || 0));
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    if (h >= 1) return `${h} ч ${String(m).padStart(2, '0')} мин`;
+    return `${m} мин`;
+  }
+
+  function sumDays(days) {
+    return days.reduce((acc, d) => ({
+      bytes: acc.bytes + d.up + d.down,
+      seconds: acc.seconds + d.seconds,
+      connections: acc.connections + d.connections
+    }), { bytes: 0, seconds: 0, connections: 0 });
+  }
+
+  function trafficHTML(bytes) {
+    const text = formatTraffic(bytes);
+    const parts = text.split(' ');
+    return escapeHtml(parts[0]) + '<small>' + escapeHtml(parts[1] || '') + '</small>';
+  }
+
+  function renderUsage() {
+    if (!usage) return;
+    const days = usage.days || [];
+    const today = sumDays(days.slice(-1));
+    const week = sumDays(days.slice(-7));
+    const month = sumDays(days);
+    if (currentPage !== 'stats') return;
+
+    $('st-today').innerHTML = trafficHTML(today.bytes);
+    $('st-week').innerHTML = trafficHTML(week.bytes);
+    $('st-month').innerHTML = trafficHTML(month.bytes);
+    setText($('st-today-time'), formatDuration(today.seconds) + ' · ' + today.connections + ' ' + plural(today.connections, 'подключение', 'подключения', 'подключений'));
+    setText($('st-week-time'), formatDuration(week.seconds) + ' в VPN');
+    setText($('st-month-time'), formatDuration(month.seconds) + ' в VPN');
+
+    const total = usage.total || {};
+    setText($('st-conn'), String(total.connections || 0));
+    setText($('st-time'), formatDuration(total.seconds));
+    setText($('st-ping'), total.avgPing ? total.avgPing + ' мс' : '—');
+    setText($('st-all'), formatTraffic((total.up || 0) + (total.down || 0)));
+
+    const last = days.slice(-14);
+    const max = Math.max(1, ...last.map((d) => d.up + d.down));
+    const weekdays = ['вс', 'пн', 'вт', 'ср', 'чт', 'пт', 'сб'];
+    $('st-days').innerHTML = last.map((d, i) => {
+      const date = new Date(d.date + 'T12:00:00');
+      const label = i === last.length - 1 ? 'сегодня' : weekdays[date.getDay()] + ' ' + date.getDate();
+      const downH = (d.down / max) * 100;
+      const upH = (d.up / max) * 100;
+      const value = d.up + d.down > 0 ? formatTraffic(d.up + d.down) : '';
+      const title = `${date.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' })}: ↓ ${formatTraffic(d.down)}, ↑ ${formatTraffic(d.up)}, ${formatDuration(d.seconds)}`;
+      return `<div class="day${i === last.length - 1 ? ' is-today' : ''}" title="${escapeHtml(title)}">
+        <span class="day-val">${escapeHtml(value)}</span>
+        <span class="day-bars"><i class="b-down" style="height:${downH.toFixed(1)}%"></i><i class="b-up" style="height:${upH.toFixed(1)}%"></i></span>
+        <span class="day-label">${escapeHtml(label)}</span>
+      </div>`;
+    }).join('');
+  }
+
+  $('stats-reset').addEventListener('click', () => guard(async () => {
+    await api('/api/usage', { method: 'DELETE' });
+    await loadUsage();
+    toast('Статистика очищена', 'ok');
+  }));
+
+  /* ==================== DNS и сброс настроек ==================== */
+
+  function renderDnsChips() {
+    const pair = [$('set-dns1').value.trim(), $('set-dns2').value.trim()].join(',');
+    for (const chip of $('dns-presets').querySelectorAll('[data-dns]')) {
+      chip.classList.toggle('is-on', chip.dataset.dns === pair);
+    }
+  }
+
+  $('dns-presets').addEventListener('click', (event) => {
+    const chip = event.target.closest('[data-dns]');
+    if (!chip) return;
+    const [dns1, dns2] = chip.dataset.dns.split(',');
+    $('set-dns1').value = dns1;
+    $('set-dns2').value = dns2;
+    renderDnsChips();
+    toast('DNS: ' + chip.textContent + ' — нажмите «Сохранить»');
+  });
+  ['set-dns1', 'set-dns2'].forEach((id) => $(id).addEventListener('input', renderDnsChips));
+
+  // Сброс в два нажатия: первое меняет надпись, второе — сбрасывает.
+  let resetArmed = null;
+  $('settings-reset').addEventListener('click', () => {
+    const button = $('settings-reset');
+    if (!resetArmed) {
+      button.textContent = 'Точно сбросить?';
+      resetArmed = setTimeout(() => { resetArmed = null; button.textContent = 'Сбросить настройки'; }, 3000);
+      return;
+    }
+    clearTimeout(resetArmed);
+    resetArmed = null;
+    button.textContent = 'Сбросить настройки';
+    guard(async () => {
+      state = await api('/api/settings/reset', { method: 'POST', body: {} });
+      themeTouched = false;
+      applyTheme(state.settings.theme);
+      renderSplit(true);
+      toast('Настройки сброшены. Подписки остались на месте', 'ok');
+    });
+  });
+
+  /* ==================== Ctrl+V, Esc ==================== */
+
+  // Ссылка подписки из буфера — с любого экрана, без поиска поля ввода.
+  function looksLikeSubscription(text) {
+    return /^(https?:\/\/|vless:\/\/|vmess:\/\/|trojan:\/\/|ss:\/\/|hy2:\/\/|hysteria2:\/\/)\S+$/i.test(text);
+  }
+
+  document.addEventListener('paste', (event) => {
+    const target = event.target;
+    if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) return;
+    const text = ((event.clipboardData && event.clipboardData.getData('text')) || '').trim();
+    if (!text) return;
+    event.preventDefault();
+    if (!looksLikeSubscription(text)) {
+      toast('В буфере не ссылка подписки', 'err');
+      return;
+    }
+    const shell = $('shell');
+    shell.classList.remove('paste-flash');
+    void shell.offsetWidth;
+    shell.classList.add('paste-flash');
+    addSubscription(text);
+  });
+
+  document.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape') return;
+    if (modalOpen) closeStrategyModal();
+    if (!$('srv-modal').hidden) closeServerModal();
+  });
+
+  /* ==================== окно сервера ==================== */
+
+  let serverModalId = '';
+
+  function openServerModal(id) {
+    const node = findNode(id);
+    if (!node) return;
+    serverModalId = id;
+    $('srv-flag').innerHTML = flags.flagHTML(node.name);
+    setText($('srv-name'), nodeName(node));
+    $('srv-rename').value = (state.nodeNames || {})[id] || '';
+    $('srv-rename').placeholder = flags.cleanName(node.name);
+    const sub = (state.subscriptions || []).find((s) => s.id === node.subId);
+    const rows = [
+      ['Название в подписке', flags.cleanName(node.name)],
+      ['Протокол', String(node.protocol || '—').toUpperCase()],
+      ['Адрес', node.address + (node.port ? ':' + node.port : '')],
+      ['Транспорт', node.transport || 'tcp'],
+      ['Защита', node.security || 'нет'],
+      ['SNI', node.sni || '—'],
+      ['Пинг', pingText(node)],
+      ['Подписка', sub ? (sub.name || 'Подписка') : '—'],
+      ['Поддержка', node.supported ? 'Да' : (node.unsupportedReason || 'Нет')]
+    ];
+    $('srv-details').innerHTML = rows.map(([k, v]) =>
+      `<div class="info-row"><span>${escapeHtml(k)}</span><b title="${escapeHtml(v)}">${escapeHtml(v)}</b></div>`).join('');
+    $('srv-connect').disabled = !node.supported;
+    $('srv-modal').hidden = false;
+  }
+
+  function closeServerModal() {
+    $('srv-modal').hidden = true;
+    serverModalId = '';
+  }
+
+  $('srv-close').addEventListener('click', closeServerModal);
+  $('srv-modal').addEventListener('click', (event) => { if (event.target === $('srv-modal')) closeServerModal(); });
+
+  async function saveServerName() {
+    const id = serverModalId;
+    if (!id) return;
+    await guard(async () => {
+      state = await api('/api/nodes/rename', { method: 'POST', body: { nodeId: id, name: $('srv-rename').value } });
+      toast($('srv-rename').value.trim() ? 'Название сохранено' : 'Вернули название из подписки', 'ok');
+    });
+    if (serverModalId === id) openServerModal(id);
+  }
+  $('srv-rename-save').addEventListener('click', saveServerName);
+  $('srv-rename').addEventListener('keydown', (event) => { if (event.key === 'Enter') saveServerName(); });
+
+  $('srv-copy').addEventListener('click', async () => {
+    const node = findNode(serverModalId);
+    if (!node) return;
+    try {
+      await navigator.clipboard.writeText(node.rawUri || '');
+      toast('Ссылка сервера скопирована', 'ok');
+    } catch (_) {
+      toast('Не удалось скопировать', 'err');
+    }
+  });
+
+  $('srv-ping').addEventListener('click', () => {
+    const id = serverModalId;
+    guard(async () => {
+      state = await api('/api/nodes/ping', { method: 'POST', body: { subscriptionId: '', nodeIds: [id] } });
+    }).then(() => { if (serverModalId === id) openServerModal(id); });
+  });
+
+  $('srv-connect').addEventListener('click', () => {
+    const id = serverModalId;
+    closeServerModal();
+    guard(async () => {
+      state = await api('/api/nodes/select', { method: 'POST', body: { nodeId: id } });
+    }).then(() => { openPage('home'); connect(id); });
+  });
+
+  /* ==================== ссылки ms7vpn:// ==================== */
+
+  let pendingLinkURL = '';
+  let linkTaking = false;
+
+  async function takeDeepLink() {
+    if (linkTaking || pendingLinkURL) return;
+    linkTaking = true;
+    try {
+      const data = await api('/api/deeplink/take', { method: 'POST', body: {} });
+      if (data && data.url) {
+        pendingLinkURL = data.url;
+        let host = data.url;
+        try { host = new URL(data.url).host; } catch (_) { /* как есть */ }
+        setText($('link-bar-url'), host);
+        $('link-bar').title = data.url;
+        $('link-bar').hidden = false;
+      }
+    } catch (_) {
+      // Старая версия программы без этого метода — молча.
+    } finally {
+      linkTaking = false;
+    }
+  }
+
+  $('link-bar-yes').addEventListener('click', () => {
+    const url = pendingLinkURL;
+    pendingLinkURL = '';
+    $('link-bar').hidden = true;
+    addSubscription(url);
+  });
+  $('link-bar-no').addEventListener('click', () => {
+    pendingLinkURL = '';
+    $('link-bar').hidden = true;
+  });
+
+  /* ==================== автозапуск и размер текста ==================== */
+
+  api('/api/autostart').then((data) => { $('set-autostart').checked = !!(data && data.enabled); }).catch(() => {});
+  $('set-autostart').addEventListener('change', async (event) => {
+    const enabled = event.target.checked;
+    try {
+      const data = await api('/api/autostart', { method: 'POST', body: { enabled } });
+      event.target.checked = !!data.enabled;
+      toast(data.enabled ? 'MS7VPN будет запускаться вместе с Windows' : 'Автозапуск выключен', 'ok');
+    } catch (error) {
+      event.target.checked = !enabled;
+      toast(error.message, 'err');
+    }
+  });
+
+  function applyFont(size) {
+    const value = ['small', 'large'].includes(size) ? size : 'normal';
+    if (value === 'normal') document.documentElement.removeAttribute('data-font');
+    else document.documentElement.setAttribute('data-font', value);
+    for (const chip of $('font-size').querySelectorAll('[data-font]')) {
+      chip.classList.toggle('is-on', chip.dataset.font === value);
+    }
+    try { localStorage.setItem('ms7-font', value); } catch (_) { /* не запомнится */ }
+    requestAnimationFrame(drawChart);
+  }
+  try { applyFont(localStorage.getItem('ms7-font')); } catch (_) { applyFont('normal'); }
+  $('font-size').addEventListener('click', (event) => {
+    const chip = event.target.closest('[data-font]');
+    if (chip) applyFont(chip.dataset.font);
+  });
+
+  /* ==================== выбор программ для «Без VPN» ====================
+
+     Список программ — плитки со значками. Значок берётся из самого exe
+     (программа находит его по имени: среди запущенных, в реестре и в папках
+     установки). Не нашли — фирменный значок популярной программы или буква. */
+
+  const APP_BRANDS = window.MS7AppIcons || [];
+  const brandFor = (exe) => APP_BRANDS.find((b) => b.exe === exe.toLowerCase().split('\\').pop());
+
+  function appIconHTML(exe) {
+    const brand = brandFor(exe);
+    const fallback = brand
+      ? `<span class="app-fb" style="background:${brand.hex}"><svg viewBox="0 0 24 24"><path d="${brand.d}"/></svg></span>`
+      : `<span class="app-fb app-letter">${escapeHtml(exe.split('\\').pop().slice(0, 1).toUpperCase())}</span>`;
+    const src = '/api/appicon?name=' + encodeURIComponent(exe) + '&token=' + encodeURIComponent(TOKEN);
+    return `<span class="app-ic"><img class="app-img" src="${escapeHtml(src)}" alt="" loading="lazy">${fallback}</span>`;
+  }
+
+  // Значок не нашёлся — показываем запасной.
+  document.addEventListener('error', (event) => {
+    const img = event.target;
+    if (img && img.classList && img.classList.contains('app-img')) img.parentElement.classList.add('is-fb');
+  }, true);
+
+  function appDisplayName(exe) {
+    const brand = brandFor(exe);
+    if (brand) return brand.name;
+    const base = exe.split('\\').pop().replace(/\.exe$/i, '');
+    return base.charAt(0).toUpperCase() + base.slice(1);
+  }
+
+  function appLines() { return linesOf($('split-apps').value); }
+  const sameApp = (a, b) => a.toLowerCase().split('\\').pop() === b.toLowerCase().split('\\').pop();
+
+  function renderAppsList() {
+    const apps = appLines();
+    $('apps-list').innerHTML = apps.length
+      ? apps.map((exe) => `<span class="app-tag" title="${escapeHtml(exe)}">${appIconHTML(exe)}<span class="app-name">${escapeHtml(appDisplayName(exe))}</span><button type="button" class="app-x" data-remove-app="${escapeHtml(exe)}" aria-label="Убрать">×</button></span>`).join('')
+      : '<span class="events-empty">Пока ни одной — выберите из популярных или запущенных.</span>';
+  }
+
+  function renderPopularApps() {
+    const apps = appLines();
+    $('apps-pop').innerHTML = APP_BRANDS.map((brand) => {
+      const on = apps.some((a) => sameApp(a, brand.exe));
+      return `<button type="button" class="app-chip${on ? ' is-on' : ''}" data-app="${escapeHtml(brand.exe)}" title="${escapeHtml(brand.exe)}">${appIconHTML(brand.exe)}<span class="app-name">${escapeHtml(brand.name)}</span>${on ? '<i class="app-check">✓</i>' : ''}</button>`;
+    }).join('');
+    renderAppsList();
+  }
+
+  function setApps(list) {
+    $('split-apps').value = list.join('\n');
+    splitDirty = true;
+    renderSplitCounts();
+    renderPopularApps();
+    renderProcesses();
+  }
+
+  function toggleApp(exe, forceOn) {
+    const apps = appLines();
+    const index = apps.findIndex((a) => sameApp(a, exe));
+    if (index >= 0 && !forceOn) apps.splice(index, 1);
+    else if (index < 0) apps.push(exe);
+    setApps(apps);
+  }
+
+  $('apps-pop').addEventListener('click', (event) => {
+    const chip = event.target.closest('[data-app]');
+    if (chip) toggleApp(chip.dataset.app, false);
+  });
+  $('apps-list').addEventListener('click', (event) => {
+    const remove = event.target.closest('[data-remove-app]');
+    if (remove) toggleApp(remove.dataset.removeApp, false);
+  });
+
+  function addTypedApp() {
+    const value = $('app-input').value.trim().replace(/^"|"$/g, '');
+    if (!value) { toast('Введите имя программы, например game.exe'); return; }
+    toggleApp(/\.exe$/i.test(value) ? value : value + '.exe', true);
+    $('app-input').value = '';
+  }
+  $('app-add').addEventListener('click', addTypedApp);
+  $('app-input').addEventListener('keydown', (event) => { if (event.key === 'Enter') addTypedApp(); });
+
+  let runningApps = [];
+
+  function renderProcesses() {
+    const box = $('apps-procs');
+    if (box.hidden) return;
+    const apps = appLines();
+    box.innerHTML = runningApps.length
+      ? runningApps.map((exe) => {
+        const on = apps.some((a) => sameApp(a, exe));
+        return `<button type="button" class="app-chip${on ? ' is-on' : ''}" data-proc="${escapeHtml(exe)}" title="${escapeHtml(exe)}">${appIconHTML(exe)}<span class="app-name">${escapeHtml(appDisplayName(exe))}</span>${on ? '<i class="app-check">✓</i>' : ''}</button>`;
+      }).join('')
+      : '<span class="events-empty">Загружаем список…</span>';
+  }
+
+  async function loadProcesses() {
+    try {
+      const data = await api('/api/processes');
+      runningApps = (data && data.processes) || [];
+    } catch (error) {
+      toast(error.message, 'err');
+    }
+    renderProcesses();
+  }
+
+  $('proc-toggle').addEventListener('click', () => {
+    const box = $('apps-procs');
+    box.hidden = !box.hidden;
+    setText($('proc-toggle'), box.hidden ? 'Из запущенных' : 'Скрыть запущенные');
+    if (!box.hidden) { renderProcesses(); loadProcesses(); }
+  });
+  $('apps-procs').addEventListener('click', (event) => {
+    const chip = event.target.closest('[data-proc]');
+    if (chip) toggleApp(chip.dataset.proc, false);
+  });
+
+  /* ==================== фон и частота опроса ==================== */
+
+  // Свёрнутое окно не тратит процессор на анимации.
+  function updatePaused() {
+    document.documentElement.classList.toggle('paused', document.visibilityState !== 'visible');
+  }
+  document.addEventListener('visibilitychange', updatePaused);
+  updatePaused();
+
+  // Пока VPN включён и видна главная, состояние опрашивается чаще — ради
+  // плавного графика скорости. В остальное время хватает прежних 2,5 с.
+  let pollTimer = null;
+  let usageTick = 0;
+  function schedulePoll() {
+    clearTimeout(pollTimer);
+    const live = state && state.connection && state.connection.connected && currentPage === 'home' && document.visibilityState === 'visible';
+    pollTimer = setTimeout(async () => {
+      await refresh();
+      pushSpeedSample();
+      takeDeepLink();
+      if (++usageTick % 12 === 0 || currentPage === 'stats') loadUsage();
+      schedulePoll();
+    }, live ? 1000 : 2500);
+  }
+
   /* ==================== запуск ==================== */
 
   api('/api/device').then((data) => { device = data; renderInfo(); }).catch(() => {});
-  refresh();
-  setInterval(refresh, 2500);
+  refresh().then(() => {
+    renderSplit(true);
+    drawChart();
+    loadUsage();
+    // Автопинг при открытии — как у мобильных клиентов. Молча: результат
+    // виден в списке и на значке сервера.
+    if (state && state.settings && state.settings.autoPing && allNodes().length && !state.connection.connecting) {
+      api('/api/nodes/ping', { method: 'POST', body: { subscriptionId: '', nodeIds: [] } })
+        .then((next) => { if (!busy) { state = next; render(); } })
+        .catch(() => {});
+    }
+  });
+  schedulePoll();
   timerHandle = setInterval(updateTimer, 1000);
+  // Страница из адреса окна (?page=stats) — для открытия из трея и проверки вида.
+  const START_PAGE = new URLSearchParams(location.search).get('page');
+  if (START_PAGE && document.querySelector('.nav-item[data-page="' + START_PAGE.replace(/[^a-z]/g, '') + '"]')) openPage(START_PAGE.replace(/[^a-z]/g, ''));
   window.addEventListener('beforeunload', () => clearInterval(timerHandle));
 
   // Маячок: сообщаем программе, что страница ожила. Без него программа не

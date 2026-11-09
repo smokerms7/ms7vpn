@@ -24,7 +24,7 @@ import (
 
 const (
 	AppName     = "MS7VPN"
-	AppVersion  = "ms7.vs2.5"
+	AppVersion  = "ms7.vs2.6"
 	Publisher   = "MS7 VPN"
 	RegistryKey = `Software\Microsoft\Windows\CurrentVersion\Uninstall\MS7VPN`
 )
@@ -85,36 +85,36 @@ func DataDir() (string, error) {
 	return filepath.Join(base, AppName), nil
 }
 
-// Writable проверяет, можно ли писать в папку.
-//
-// Нужна мастеру: если человек выберет Program Files, запись без прав
-// администратора не пройдёт, и узнать об этом лучше до начала установки,
-// а не на середине распаковки.
-func Writable(dir string) bool {
+// CheckInstallDir tests write access in the nearest existing directory.
+func CheckInstallDir(dir string) error {
 	target := dir
-	// Поднимаемся до первой существующей папки: сама папка установки
-	// обычно ещё не создана.
 	for {
-		if info, err := os.Stat(target); err == nil {
+		info, err := os.Stat(target)
+		if err == nil {
 			if !info.IsDir() {
-				return false
+				return fmt.Errorf("%q: путь занят файлом", target)
 			}
 			break
 		}
+		if !os.IsNotExist(err) {
+			return err
+		}
 		parent := filepath.Dir(target)
 		if parent == target {
-			return false
+			return err
 		}
 		target = parent
 	}
 	probe, err := os.CreateTemp(target, ".ms7vpn-*")
 	if err != nil {
-		return false
+		return err
 	}
-	name := probe.Name()
-	probe.Close()
-	_ = os.Remove(name)
-	return true
+	closeErr := probe.Close()
+	removeErr := os.Remove(probe.Name())
+	if closeErr != nil {
+		return closeErr
+	}
+	return removeErr
 }
 
 func HiddenCommand(name string, args ...string) *exec.Cmd {

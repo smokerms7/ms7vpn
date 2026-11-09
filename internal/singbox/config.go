@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"ms7vpn/internal/model"
+	"ms7vpn/internal/splitroute"
 	"ms7vpn/internal/subscription"
 )
 
@@ -22,6 +23,14 @@ type Options struct {
 	// When set, Xray is the selected protocol engine; sing-box only supplies TUN.
 	XraySOCKSPort int
 	BlockAds      bool
+
+	// «Без VPN». Домены уже очищены splitroute. Когда соединение держит
+	// Xray (XraySOCKSPort > 0), доменные правила применяет он, а здесь
+	// остаются только программы — их видит лишь адаптер TUN.
+	DirectRu      bool
+	DirectDomains []string
+	ProxyDomains  []string
+	DirectApps    []string
 }
 
 func Build(node model.Node, o Options) ([]byte, error) {
@@ -59,9 +68,27 @@ func Build(node model.Node, o Options) ([]byte, error) {
 		inbounds = append(inbounds, map[string]any{"type": "http", "tag": "http-in", "listen": "127.0.0.1", "listen_port": o.HTTPPort}, map[string]any{"type": "socks", "tag": "socks-in", "listen": "127.0.0.1", "listen_port": o.SOCKSPort})
 	}
 	rules := []any{map[string]any{"action": "sniff"}, map[string]any{"protocol": "dns", "action": "hijack-dns"}, map[string]any{"ip_is_private": true, "action": "route", "outbound": "direct"}}
+	if o.Mode == "tun" && len(o.DirectApps) > 0 {
+		rules = append(rules, map[string]any{"process_name": o.DirectApps, "action": "route", "outbound": "direct"})
+	}
+	domainRouting := o.XraySOCKSPort == 0
+	proxyMatch := matchFields(o.ProxyDomains, nil, true)
+	if domainRouting && proxyMatch != nil {
+		proxyMatch["action"], proxyMatch["outbound"] = "route", "proxy"
+		rules = append(rules, proxyMatch)
+	}
 	if o.BlockAds {
 		// An embedded baseline works offline; do not silently download third-party lists.
 		rules = append(rules, map[string]any{"domain_suffix": []string{"doubleclick.net", "googlesyndication.com", "googleadservices.com", "adservice.google.com", "app-measurement.com"}, "action": "reject"})
+	}
+	var ru []string
+	if o.DirectRu {
+		ru = append(append(ru, splitroute.RuZones...), splitroute.RuServices...)
+	}
+	directMatch := matchFields(o.DirectDomains, ru, true)
+	if domainRouting && directMatch != nil {
+		directMatch["action"], directMatch["outbound"] = "route", "direct"
+		rules = append(rules, directMatch)
 	}
 	route := map[string]any{"rules": rules, "final": "proxy", "default_domain_resolver": map[string]any{"server": "bootstrap", "strategy": "prefer_ipv4"}}
 	if o.Interface != "" {
@@ -73,18 +100,64 @@ func Build(node model.Node, o Options) ([]byte, error) {
 	if o.Interface != "" {
 		bootstrap["bind_interface"] = o.Interface
 	}
+	dns := map[string]any{"servers": []any{
+		bootstrap,
+		map[string]any{"type": "udp", "tag": "remote", "server": o.DNS1, "detour": "proxy"},
+	}, "final": "remote", "strategy": "prefer_ipv4"}
+	// Прямые сайты разрешаются прямым DNS: иначе CDN отдавал бы адреса для
+	// страны VPN-сервера, и российский сайт открывался бы медленнее.
+	if directDNS := matchFields(o.DirectDomains, ru, false); directDNS != nil {
+		dnsRules := []any{}
+		if proxyDNS := matchFields(o.ProxyDomains, nil, false); proxyDNS != nil {
+			proxyDNS["server"] = "remote"
+			dnsRules = append(dnsRules, proxyDNS)
+		}
+		directDNS["server"] = "bootstrap"
+		dnsRules = append(dnsRules, directDNS)
+		dns["rules"] = dnsRules
+	}
 	config := map[string]any{
-		"log":       map[string]any{"level": "info", "timestamp": true},
-		"inbounds":  inbounds,
-		"outbounds": []any{outbound, map[string]any{"type": "direct", "tag": "direct"}},
-		"route":     route,
-		"dns": map[string]any{"servers": []any{
-			bootstrap,
-			map[string]any{"type": "udp", "tag": "remote", "server": o.DNS1, "detour": "proxy"},
-		}, "final": "remote", "strategy": "prefer_ipv4"},
+		"log":          map[string]any{"level": "info", "timestamp": true},
+		"inbounds":     inbounds,
+		"outbounds":    []any{outbound, map[string]any{"type": "direct", "tag": "direct"}},
+		"route":        route,
+		"dns":          dns,
 		"experimental": map[string]any{"clash_api": map[string]any{"external_controller": fmt.Sprintf("127.0.0.1:%d", o.APIPort), "secret": o.Secret, "access_control_allow_origin": []string{"http://127.0.0.1"}}},
 	}
 	return json.MarshalIndent(config, "", "  ")
+}
+
+// matchFields — условия правила sing-box из списка пользователя и
+// дополнительных доменов. Без баз geosite/geoip (sing-box их не читает)
+// такие записи пропускаются. withIP=false — для DNS, где адресов ещё нет.
+func matchFields(list, extraDomains []string, withIP bool) map[string]any {
+	domains, keywords, cidrs, _, _ := splitroute.Split(list)
+	domains = append(domains, extraDomains...)
+	out := map[string]any{}
+	if len(domains) > 0 {
+		out["domain_suffix"] = domains
+	}
+	if len(keywords) > 0 {
+		out["domain_keyword"] = keywords
+	}
+	if withIP && len(cidrs) > 0 {
+		out["ip_cidr"] = cidrs
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// DirectSuffixes — домены, которые идут мимо VPN: российские (если
+// включено) и список пользователя.
+func DirectSuffixes(ru bool, user []string) []string {
+	out := append([]string{}, user...)
+	if ru {
+		out = append(out, splitroute.RuZones...)
+		out = append(out, splitroute.RuServices...)
+	}
+	return out
 }
 
 func Outbound(node model.Node) (map[string]any, error) {

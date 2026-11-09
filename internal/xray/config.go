@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"ms7vpn/internal/model"
+	"ms7vpn/internal/splitroute"
 	"ms7vpn/internal/subscription"
 )
 
@@ -63,6 +64,36 @@ type ConfigOptions struct {
 
 	// EnableStats включает локальный API со счётчиками трафика.
 	EnableStats bool
+
+	// «Без VPN»: российские сайты и списки пользователя. Домены уже
+	// очищены splitroute.CleanDomains.
+	DirectRu      bool
+	DirectDomains []string
+	ProxyDomains  []string
+
+	// NativeTun — TUN самого Xray, как в Shade: вход tun на wintun, DNS из
+	// туннеля — в dns-out. Маршруты в туннель и DNS адаптера ставит tunnet.
+	// SendThrough — адрес физического адаптера: прямой трафик выходит через
+	// него, а не обратно в туннель. DirectApps — программы мимо VPN.
+	NativeTun   bool
+	SendThrough string
+	DirectApps  []string
+}
+
+// TunAdapterName — имя адаптера встроенного TUN Xray.
+const TunAdapterName = "MS7VPN-XRAY"
+
+// TunAdapterNames — основное имя и запасные. Xray выводит идентификатор
+// адаптера из имени (MD5), и после аварийного завершения Windows иногда
+// держит это имя занятым до перезагрузки («Cannot create a file when that
+// file already exists»). Тогда подключаемся под запасным именем.
+var TunAdapterNames = []string{TunAdapterName, "MS7VPN-XRAY-2", "MS7VPN-XRAY-3", "MS7VPN-XRAY-4"}
+
+func tunName(name string) string {
+	if name == "" {
+		return TunAdapterName
+	}
+	return name
 }
 
 // BuildResult — конфиг плюс предупреждения, которые стоит показать человеку.
@@ -117,7 +148,7 @@ func Build(node model.Node, options ConfigOptions) (BuildResult, error) {
 		}
 		stream["sockopt"] = map[string]any{"interface": options.BindInterface}
 	}
-	if strings.EqualFold(options.Mode, "tun") {
+	if strings.EqualFold(options.Mode, "tun") && !options.NativeTun {
 		return BuildResult{}, errors.New("TUN управляется сетевым слоем sing-box; запустите Xray с локальным SOCKS")
 	}
 
@@ -151,12 +182,41 @@ func Build(node model.Node, options ConfigOptions) (BuildResult, error) {
 		warnings = append(warnings, "Блокировка рекламы отключена: рядом с xray.exe нет geosite.dat")
 	}
 
+	useGeoIP := options.DirectRu && hasGeoIP(options.GeoDir)
+	geo := geoAvailability{site: hasGeosite(options.GeoDir), ip: hasGeoIP(options.GeoDir)}
+	if userRulesNeedGeo(options.DirectDomains, options.ProxyDomains, geo) {
+		warnings = append(warnings, "Правила geosite/geoip пропущены: рядом с xray.exe нет geosite.dat или geoip.dat (они есть в полной установке)")
+	}
+	outbounds := buildOutbounds(outbound)
+	if options.NativeTun {
+		direct := outbounds[1].(map[string]any)
+		if options.SendThrough != "" {
+			direct["sendThrough"] = options.SendThrough
+		}
+		outbounds = append(outbounds, map[string]any{"tag": "dns-out", "protocol": "dns"})
+	} else if options.BindInterface != "" {
+		// В TUN прямой выход тоже должен идти мимо адаптера, иначе трафик
+		// «Без VPN» вернулся бы в туннель и зациклился.
+		direct := outbounds[1].(map[string]any)
+		direct["streamSettings"] = map[string]any{"sockopt": map[string]any{"interface": options.BindInterface}}
+	}
+	inbounds := buildInbounds(options)
+	if options.NativeTun {
+		tun := map[string]any{
+			"tag": "tun-in", "protocol": "tun",
+			// Адрес адаптеру ставит само ядро сразу после создания: без него
+			// Windows выдаёт 169.254.x.x и трафик идёт не сразу.
+			"settings": map[string]any{"name": tunName(options.TunName), "mtu": 9000, "gateway": []string{"198.18.0.1/30"}},
+			"sniffing": map[string]any{"enabled": true, "destOverride": []string{"http", "tls", "quic"}, "routeOnly": true},
+		}
+		inbounds = append([]any{tun}, inbounds...)
+	}
 	config := map[string]any{
 		"log":       logSettings,
 		"dns":       buildDNS(options),
-		"inbounds":  buildInbounds(options),
-		"outbounds": buildOutbounds(outbound),
-		"routing":   buildRouting(options, blockAds),
+		"inbounds":  inbounds,
+		"outbounds": outbounds,
+		"routing":   buildRouting(options, blockAds, useGeoIP, geo),
 	}
 
 	if options.EnableStats {
@@ -179,6 +239,14 @@ func Build(node model.Node, options ConfigOptions) (BuildResult, error) {
 		return BuildResult{}, err
 	}
 	return BuildResult{Config: data, Warnings: warnings}, nil
+}
+
+func hasGeoIP(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	info, err := os.Stat(filepath.Join(dir, "geoip.dat"))
+	return err == nil && !info.IsDir() && info.Size() > 100_000
 }
 
 func hasGeosite(dir string) bool {
@@ -236,25 +304,120 @@ func buildInbounds(options ConfigOptions) []any {
 	}
 }
 
-func buildRouting(options ConfigOptions, blockAds bool) map[string]any {
+type geoAvailability struct{ site, ip bool }
+
+func userRulesNeedGeo(direct, proxy []string, geo geoAvailability) bool {
+	for _, list := range [][]string{direct, proxy} {
+		_, _, _, sites, ips := splitroute.Split(list)
+		if (len(sites) > 0 && !geo.site) || (len(ips) > 0 && !geo.ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// userRules — правила Xray из списка пользователя: доменные и адресные
+// отдельно, потому что в одном правиле Xray требует совпадения обоих.
+func userRules(list []string, outbound string, geo geoAvailability) []any {
+	domains, keywords, cidrs, sites, ips := splitroute.Split(list)
+	names := domainRules(domains)
+	for _, keyword := range keywords {
+		names = append(names, "keyword:"+keyword)
+	}
+	if geo.site {
+		for _, site := range sites {
+			names = append(names, "geosite:"+site)
+		}
+	}
+	addresses := append([]string{}, cidrs...)
+	if geo.ip {
+		for _, code := range ips {
+			addresses = append(addresses, "geoip:"+code)
+		}
+	}
+	var rules []any
+	if len(names) > 0 {
+		rules = append(rules, map[string]any{"type": "field", "domain": names, "outboundTag": outbound})
+	}
+	if len(addresses) > 0 {
+		rules = append(rules, map[string]any{"type": "field", "ip": addresses, "outboundTag": outbound})
+	}
+	return rules
+}
+
+func buildRouting(options ConfigOptions, blockAds, useGeoIP bool, geo geoAvailability) map[string]any {
 	rules := []any{}
 	if options.EnableStats {
 		rules = append(rules, map[string]any{
 			"type": "field", "inboundTag": []string{"api"}, "outboundTag": "api",
 		})
 	}
+	if options.NativeTun {
+		// DNS-запросы системы из туннеля отвечает DNS-модуль Xray.
+		rules = append(rules, map[string]any{"type": "field", "inboundTag": []string{"tun-in"}, "network": "udp", "port": 53, "outboundTag": "dns-out"})
+		if names := processNames(options.DirectApps); len(names) > 0 {
+			rules = append(rules, map[string]any{"type": "field", "process": names, "outboundTag": "direct"})
+		}
+	}
 	rules = append(rules,
 		map[string]any{"type": "field", "ip": privateRanges, "outboundTag": "direct"},
 		map[string]any{"type": "field", "domain": directDomains, "outboundTag": "direct"},
 	)
+	// «Через VPN» пользователя — раньше всего остального: этим списком
+	// человек вытаскивает отдельный сайт из-под «российских напрямую».
+	rules = append(rules, userRules(options.ProxyDomains, "proxy", geo)...)
 	if blockAds {
 		rules = append(rules, map[string]any{
 			"type": "field", "domain": []string{"geosite:category-ads-all"}, "outboundTag": "block",
 		})
 	}
+	rules = append(rules, userRules(options.DirectDomains, "direct", geo)...)
+	if options.DirectRu {
+		rules = append(rules, map[string]any{
+			"type": "field", "domain": domainRules(append(append([]string{}, splitroute.RuZones...), splitroute.RuServices...)), "outboundTag": "direct",
+		})
+		if useGeoIP {
+			rules = append(rules, map[string]any{
+				"type": "field", "ip": []string{"geoip:ru"}, "outboundTag": "direct",
+			})
+		}
+	}
 	// IPIfNonMatch — как в рабочей сборке. Менять эту стратегию без проверки
 	// на живом подключении нельзя: от неё зависит и маршрутизация, и DNS.
 	return map[string]any{"domainStrategy": "IPIfNonMatch", "rules": rules}
+}
+
+// processNames — имена программ для правила process. Xray сравнивает с
+// учётом регистра, а Windows — нет, поэтому каждое имя даётся в нескольких
+// написаниях: как есть, строчными и с заглавной.
+func processNames(apps []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(v string) {
+		if v != "" && !seen[v] {
+			seen[v] = true
+			out = append(out, v)
+		}
+	}
+	for _, app := range apps {
+		lower := strings.ToLower(app)
+		add(app)
+		add(lower)
+		if lower != "" {
+			add(strings.ToUpper(lower[:1]) + lower[1:])
+		}
+	}
+	return out
+}
+
+// domainRules превращает домены в правила Xray: «domain:» совпадает с самим
+// доменом и всеми поддоменами.
+func domainRules(domains []string) []string {
+	out := make([]string, 0, len(domains))
+	for _, domain := range domains {
+		out = append(out, "domain:"+domain)
+	}
+	return out
 }
 
 func buildOutbound(parsed subscription.ParsedNode) (map[string]any, error) {

@@ -210,6 +210,11 @@ func authorized(r *http.Request, token string) bool {
 // Run поднимает локальный сервер на 127.0.0.1 и открывает окно WebView2.
 // Возвращает ошибку, если WebView2 недоступен — вызывающий код может
 // откатиться на старое нативное окно.
+// StartHidden — запуск вместе с Windows: окно сразу уходит в трей.
+var StartHidden bool
+
+var procShowWindow = windows.NewLazySystemDLL("user32.dll").NewProc("ShowWindow")
+
 func Run(app *ms7app.App, autoConnect string) error {
 	token, err := newToken()
 	if err != nil {
@@ -366,6 +371,11 @@ func Run(app *ms7app.App, autoConnect string) error {
 	view.SetSize(minWidth, minHeight, webview2.HintMin)
 	view.SetSize(windowWidth, windowHeight, webview2.HintNone)
 
+	if StartHidden {
+		const swHide = 0
+		procShowWindow.Call(uintptr(view.Window()), swHide)
+	}
+
 	stopTray := startTray(app, uintptr(view.Window()))
 	defer stopTray()
 
@@ -409,7 +419,9 @@ func Run(app *ms7app.App, autoConnect string) error {
 			view.Dispatch(func() { view.Navigate(url) })
 			time.Sleep(retryWait)
 		}
-		if uiReady.Load() {
+		// Спрятанное окно WebView2 может не рисоваться вовсе — это не
+		// поломка, а значит, и откатываться на запасное окно незачем.
+		if uiReady.Load() || StartHidden {
 			return
 		}
 		log.Printf("%s  интерфейс не отрисовался за %d попыток (страница запрошена %d раз)",

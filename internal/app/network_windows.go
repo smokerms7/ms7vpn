@@ -35,8 +35,24 @@ func tunEnvironment(ctx context.Context) (string, error) {
 	return state.Interface, nil
 }
 
+// physicalInterface — основной физический адаптер с выходом в интернет, даже
+// если поверх него включён чужой туннель. Нужен, чтобы проверка пинга шла
+// мимо любого TUN.
+func physicalInterface(ctx context.Context) (string, error) {
+	const script = `$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[System.Text.UTF8Encoding]::new(); $best=@(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' | ForEach-Object { $a=Get-NetAdapter -InterfaceIndex $_.InterfaceIndex -ErrorAction SilentlyContinue; if($a -and $a.HardwareInterface -and $a.Status -eq 'Up'){ $i=Get-NetIPInterface -InterfaceIndex $_.InterfaceIndex -AddressFamily IPv4; [PSCustomObject]@{name=$a.Name;metric=($_.RouteMetric+$i.InterfaceMetric)} } }) | Sort-Object metric | Select-Object -First 1; if($best){$best.name}`
+	out, err := networkRead(ctx, script)
+	if err != nil {
+		return "", err
+	}
+	name := strings.TrimSpace(string(out))
+	if name == "" {
+		return "", fmt.Errorf("не найден физический сетевой адаптер")
+	}
+	return name, nil
+}
+
 func verifyTunRoutes(ctx context.Context) error {
-	const script = `$ErrorActionPreference='Stop'; $a=Get-NetAdapter -Name 'MS7VPN-TUN'; if($a.Status -ne 'Up'){throw 'MS7VPN-TUN не поднят'}; $ip=@(Get-NetIPAddress -InterfaceIndex $a.ifIndex -AddressFamily IPv4 | Where-Object {$_.IPAddress -eq '172.28.217.1'}); if(-not $ip){throw 'MS7VPN-TUN не получил адрес'}; foreach($prefix in @('0.0.0.0/1','128.0.0.0/1')){$r=@(Get-NetRoute -InterfaceIndex $a.ifIndex -DestinationPrefix $prefix -ErrorAction SilentlyContinue);if(-not $r){throw ('Отсутствует маршрут '+$prefix)}}; 'ok'`
+	const script = `$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[System.Text.UTF8Encoding]::new(); $a=Get-NetAdapter -Name 'MS7VPN-TUN'; if($a.Status -ne 'Up'){throw 'MS7VPN-TUN не поднят'}; $ip=@(Get-NetIPAddress -InterfaceIndex $a.ifIndex -AddressFamily IPv4 | Where-Object {$_.IPAddress -eq '172.28.217.1'}); if(-not $ip){throw 'MS7VPN-TUN не получил адрес'}; foreach($prefix in @('0.0.0.0/1','128.0.0.0/1')){$r=@(Get-NetRoute -InterfaceIndex $a.ifIndex -DestinationPrefix $prefix -ErrorAction SilentlyContinue);if(-not $r){throw ('Отсутствует маршрут '+$prefix)}}; 'ok'`
 	_, err := networkRead(ctx, script)
 	return err
 }
