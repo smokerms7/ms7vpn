@@ -1,0 +1,340 @@
+/* MS7VPN для Android: тот же интерфейс, что на ПК, разложенный под телефон.
+   Меню — как в Happ: настройки слева сверху, «+» справа; страницы в одну колонку. */
+
+:root { --m-nav-h: 64px; --m-safe-b: env(safe-area-inset-bottom, 0px); --m-safe-t: env(safe-area-inset-top, 0px); }
+
+html, body { font-size: 14px; -webkit-tap-highlight-color: transparent; overscroll-behavior: none; }
+body.is-android { user-select: none; }
+
+.is-android .shell { flex-direction: column; height: 100vh; height: 100dvh; }
+
+/* ==== навигация как в Happ: меню снизу нет ====
+   Слева сверху — настройки (или «назад»), справа — «+». */
+.is-android .sidebar { display: none; }
+
+.m-top-btn {
+  flex: none;
+  width: 44px; height: 44px;
+  display: grid; place-items: center;
+  border: 1px solid var(--panel-line);
+  border-radius: 14px;
+  background: var(--panel);
+  color: var(--text);
+  cursor: pointer;
+}
+.m-top-btn svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.m-top-btn:active { transform: scale(0.94); }
+.m-top-add {
+  border-color: transparent;
+  background: linear-gradient(140deg, var(--accent) 0%, var(--accent-2) 100%);
+  color: var(--on-accent);
+  box-shadow: 0 8px 22px rgba(176, 38, 255, 0.35);
+}
+.m-top-add svg { stroke-width: 2.4; }
+
+/* меню разделов в начале настроек */
+.m-hub { padding: 6px; gap: 2px; }
+.m-hub-row {
+  display: flex; align-items: center; gap: 14px;
+  padding: 13px 12px;
+  border: none; border-radius: 12px;
+  background: transparent; color: var(--text);
+  text-align: left; cursor: pointer;
+}
+.m-hub-row:active { background: var(--hover); }
+.m-hub-row > svg { flex: none; width: 22px; height: 22px; fill: none; stroke: var(--accent); stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.m-hub-row .row-main { flex: 1; min-width: 0; }
+.m-hub-go { margin-left: auto; color: var(--muted); display: grid; }
+.m-hub-go svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+
+/* ==== подписки с серверами на главной ==== */
+.is-android #server-chip, .is-android #home-sub-card { display: none !important; }
+.m-subs { width: 100%; display: flex; flex-direction: column; gap: 12px; margin-top: 4px; }
+.m-sub { padding: 6px; gap: 0; overflow: hidden; }
+.m-sub.has-selected { border-color: rgba(176, 38, 255, 0.45); }
+.m-sub-head { display: flex; align-items: center; gap: 6px; padding: 4px 4px 4px 0; }
+.m-sub-title {
+  flex: 1; min-width: 0;
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 6px 8px 10px;
+  border: none; border-radius: 12px;
+  background: transparent; color: var(--text);
+  text-align: left; cursor: pointer;
+}
+.m-sub-title .row-main { flex: 1; min-width: 0; }
+.m-sub-title .row-title { font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.m-sub-title .row-sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.m-chev { display: grid; color: var(--muted); transition: transform 160ms ease; }
+.m-chev svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.m-chev.is-open { transform: rotate(180deg); }
+.m-icon-btn {
+  flex: none;
+  width: 40px; height: 40px;
+  display: grid; place-items: center;
+  border: 1px solid var(--panel-line);
+  border-radius: 12px;
+  background: var(--surface-strong);
+  color: var(--text);
+  cursor: pointer;
+}
+.m-icon-btn svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+.m-icon-btn[data-ping] svg { stroke: #E5A54B; }
+.m-icon-btn:active { transform: scale(0.92); }
+.m-icon-btn.is-busy { pointer-events: none; opacity: 0.7; }
+.m-icon-btn.is-busy svg { animation: m-spin 0.9s linear infinite; }
+@keyframes m-spin { to { transform: rotate(360deg); } }
+.m-sub-err { margin: 2px 10px 6px; font-size: 12px; color: var(--err-text); }
+
+.m-nodes { display: flex; flex-direction: column; gap: 2px; padding: 2px 0 2px; border-top: 1px solid var(--panel-line); margin-top: 4px; padding-top: 6px; }
+.m-node {
+  display: flex; align-items: center; gap: 12px;
+  padding: 11px 10px;
+  border: 1px solid transparent; border-radius: 12px;
+  background: transparent; color: var(--text);
+  text-align: left; cursor: pointer;
+  transition: background 120ms ease;
+}
+.m-node:active { background: var(--hover); }
+.m-node.is-selected { background: var(--accent-soft); border-color: rgba(176, 38, 255, 0.35); }
+.m-node.is-off { opacity: 0.45; }
+.m-flag { flex: none; display: grid; }
+.m-flag .flag { width: 30px; height: 21px; border-radius: 5px; }
+.m-node-name { flex: 1; min-width: 0; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.m-ping { flex: none; font-size: 12px; font-variant-numeric: tabular-nums; color: var(--muted); padding: 3px 8px; border-radius: 999px; background: var(--surface-strong); }
+.m-ping.is-fast { color: #35D07F; }
+.m-ping.is-mid { color: #E5A54B; }
+.m-ping.is-bad { color: #FF5C74; }
+.m-radio { flex: none; width: 18px; height: 18px; border-radius: 50%; border: 2px solid var(--ring); }
+.m-node.is-selected .m-radio { border-color: var(--accent); background: radial-gradient(circle, var(--accent) 0 45%, transparent 50%); }
+.m-node.is-live .m-radio { border-color: #35D07F; background: radial-gradient(circle, #35D07F 0 45%, transparent 50%); box-shadow: 0 0 10px rgba(53, 208, 127, 0.6); }
+
+.m-empty { flex-direction: row; align-items: center; gap: 14px; text-align: left; color: var(--text); cursor: pointer; border-style: dashed; }
+.m-empty-ic { width: 42px; height: 42px; display: grid; place-items: center; border-radius: 12px; background: var(--accent-soft); color: var(--accent); }
+.m-empty-ic svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; }
+
+
+/* ==== содержимое ==== */
+.is-android .aurora { position: fixed; inset: 0; left: 0; }
+.is-android .aurora .a1 { width: 120vw; height: 50vh; left: -10vw; }
+.is-android .aurora .a2 { width: 110vw; height: 60vh; }
+.is-android .aurora .a3 { width: 90vw; height: 40vh; }
+.is-android .main {
+  order: 1;
+  flex: 1 1 auto;
+  height: 100%;
+  padding: calc(10px + var(--m-safe-t)) 16px calc(var(--m-safe-b) + 24px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
+}
+.is-android .topbar { min-height: 44px; margin-bottom: 6px; gap: 12px; justify-content: flex-start; }
+.is-android .topbar-right { display: none; }
+.is-android .greeting { flex: 1; }
+.is-android .greeting { min-width: 0; }
+.is-android .greet-title { font-size: 16px; }
+.is-android .greet-sub { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.is-android .status-pill { padding: 7px 12px; font-size: 12px; white-space: nowrap; }
+
+.is-android .page { gap: 12px; padding-top: 6px; }
+.is-android .page-head { flex-wrap: wrap; gap: 8px 10px; }
+.is-android .page-head h2 { font-size: 20px; }
+.is-android .page-actions { margin-left: 0; width: 100%; flex-wrap: wrap; gap: 8px; }
+.is-android .page-actions .btn { flex: 1 1 auto; }
+.is-android .page-sub { width: 100%; margin: 0; }
+
+.is-android .card { padding: 14px 14px; border-radius: 16px; }
+.is-android .row { flex-wrap: wrap; }
+.is-android .row > input[type="text"], .is-android .row > input:not([type]) { flex: 1 1 100%; min-width: 0; }
+.is-android .row-end { justify-content: stretch; }
+.is-android .row-end > .btn { flex: 1 1 auto; }
+.is-android .row-end > .hint { flex: 1 1 100%; }
+.is-android .btn { min-height: 42px; }
+.is-android .btn-small { min-height: 32px; }
+.is-android input, .is-android select, .is-android textarea { font-size: 16px; }
+
+/* главная */
+.is-android .home-col { max-width: 520px; gap: 12px; padding-top: 6px; }
+.is-android .home-col .orb { --ps: min(62vw, 250px); margin-top: 4px; }
+.is-android .stats4 { gap: 8px; }
+
+/* списки серверов и подписок */
+.is-android .row-item { padding: 12px 12px; gap: 10px; }
+.is-android .row-title { overflow: hidden; text-overflow: ellipsis; }
+.is-android .row-main { min-width: 0; }
+
+/* «Без VPN» */
+.is-android .split-grid { grid-template-columns: 1fr; }
+.is-android .split-hero { gap: 12px; }
+.is-android .apps-add { flex-wrap: wrap; }
+.is-android .apps-add input { flex: 1 1 100%; }
+.is-android .apps-add .btn { flex: 1 1 auto; }
+.is-android .apps-pop { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
+.is-android .apps-procs { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); max-height: 340px; }
+
+/* статистика */
+.is-android .stats-tiles { grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+.is-android .stile { padding: 12px 10px; }
+.is-android .stile-v { font-size: 17px; }
+
+/* настройки */
+.is-android .themes { flex-wrap: wrap; }
+.is-android .grid-2 { grid-template-columns: 1fr; }
+.is-android .chips { flex-wrap: wrap; }
+.is-android .switch { align-items: flex-start; padding: 4px 0; }
+
+/* информация */
+.is-android .info-row { gap: 10px; }
+.is-android .info-row b { text-align: right; overflow-wrap: anywhere; }
+.is-android .info-id { flex-wrap: wrap; justify-content: flex-end; }
+.is-android .info-id code { overflow-wrap: anywhere; }
+.is-android .update-card, .is-android .info-channel { flex-wrap: wrap; }
+.is-android .update-card .row-main, .is-android .info-channel .row-main { flex: 1 1 60%; }
+
+/* журнал */
+.is-android .log { font-size: 11px; max-height: none; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* окна: снизу, как лист */
+.is-android .modal { align-items: flex-end; padding: 0; }
+.is-android .modal-box {
+  width: 100%;
+  max-height: 88vh;
+  border-radius: 22px 22px 0 0;
+  padding: 18px 16px calc(18px + var(--m-safe-b));
+  overflow-y: auto;
+}
+
+/* всплывашки — над нижним меню */
+.is-android .toast {
+  bottom: calc(var(--m-safe-b) + 24px);
+  max-width: calc(100vw - 32px);
+  width: max-content;
+  text-align: center;
+  z-index: 50;
+}
+
+.is-android .link-bar, .is-android .update-banner { flex-wrap: wrap; }
+
+/* узкие телефоны */
+@media (max-width: 360px) {
+  .is-android .nav-item { font-size: 10px; }
+  .is-android .stats-tiles { grid-template-columns: 1fr; }
+  .is-android .main { padding-left: 12px; padding-right: 12px; }
+}
+
+/* подписки: кнопки строки — под названием */
+.is-android #sub-list .row-item { flex-wrap: wrap; }
+.is-android #sub-list .row-item .row-main { flex: 1 1 calc(100% - 60px); }
+.is-android #sub-list .row-item .btn { flex: 1 1 auto; }
+
+/* настройки по разделам */
+.m-sec-title { margin: 10px 4px -4px; font-size: 13px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--accent); }
+.m-sec { gap: 12px; }
+.m-link-row { margin: 0 -8px; padding: 12px 8px; }
+.m-sec .row-end { margin-top: 4px; }
+
+/* окно «+» справа под кнопкой */
+.m-pop {
+  position: fixed; z-index: 45;
+  min-width: 250px;
+  display: flex; flex-direction: column;
+  padding: 6px;
+  border: 1px solid var(--panel-line);
+  border-radius: 16px;
+  background: var(--bg-side);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
+  transform-origin: top right;
+  transform: scale(0.92); opacity: 0;
+  transition: transform 140ms ease, opacity 140ms ease;
+}
+.m-pop.is-open { transform: scale(1); opacity: 1; }
+.m-pop-item {
+  display: flex; align-items: center; gap: 12px;
+  padding: 12px 12px;
+  border: none; border-radius: 11px;
+  background: transparent; color: var(--text);
+  font-size: 15px; text-align: left; cursor: pointer;
+}
+.m-pop-item:active { background: var(--hover); }
+.m-pop-item svg { flex: none; width: 21px; height: 21px; fill: none; stroke: var(--accent); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+
+/* окно ввода ссылки */
+.m-dlg { position: fixed; inset: 0; z-index: 46; display: flex; align-items: center; justify-content: center; padding: 20px; background: rgba(4, 2, 8, 0.6); }
+.m-dlg-box { width: min(440px, 100%); display: flex; flex-direction: column; gap: 12px; padding: 18px; border: 1px solid var(--panel-line); border-radius: 18px; background: var(--bg-side); box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5); }
+.m-dlg-title { margin: 0; font-size: 17px; }
+.m-dlg-url, .m-dlg-name { width: 100%; padding: 12px 14px; border: 1px solid var(--panel-line); border-radius: 12px; background: var(--surface-strong); color: var(--text); font: inherit; font-size: 15px; resize: none; user-select: text; }
+.m-dlg-url { font-family: ui-monospace, monospace; font-size: 13px; word-break: break-all; }
+.m-dlg-actions { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
+.m-dlg-actions .btn:first-child { margin-right: auto; }
+
+/* свайп справа налево — «Удалить» */
+.m-swipe { position: relative; border-radius: 16px; overflow: hidden; transition: opacity 200ms ease, max-height 260ms ease; }
+.m-swipe .m-sub { position: relative; z-index: 1; touch-action: pan-y; background: linear-gradient(var(--panel), var(--panel)), var(--bg); }
+.m-swipe.is-open .m-sub { transform: translateX(-104px); }
+.m-swipe-del {
+  position: absolute; top: 0; right: 0; bottom: 0; z-index: 0;
+  width: 104px;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px;
+  border: none; border-radius: 16px;
+  background: linear-gradient(160deg, #FF5C74 0%, #E0284A 100%);
+  color: #fff; font-size: 13px; font-weight: 700; cursor: pointer;
+  opacity: 0; transition: opacity 120ms ease;
+}
+.m-swipe.is-open .m-swipe-del, .m-swipe.is-revealing .m-swipe-del { opacity: 1; }
+.m-swipe-del svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.m-swipe.is-removing { opacity: 0.35; pointer-events: none; }
+
+/* ==== шапка без приветствия ==== */
+.is-android .greeting { display: none; }
+.m-brand { flex: 1; text-align: center; font-size: 19px; font-weight: 800; letter-spacing: 0.04em; color: var(--text); }
+.m-brand b { color: var(--accent); font-weight: 800; }
+
+/* ==== плавная прокрутка: без тяжёлых эффектов ==== */
+.is-android .aurora i { animation: none; filter: blur(60px); }
+.is-android .card, .is-android .status-pill, .is-android .st4 { backdrop-filter: none; -webkit-backdrop-filter: none; }
+.is-android .main { scroll-behavior: auto; overscroll-behavior-y: contain; }
+.is-android .m-subs { contain: layout paint; }
+
+/* ==== настройки как в Happ ==== */
+.m-sec { gap: 2px; padding: 6px 14px; }
+.m-sec > .field, .m-sec > .grid-2, .m-sec > small.field-hint { padding: 10px 0; }
+.m-sec > * + * { border-top: 1px solid var(--line-soft); }
+.m-sec > small.field-hint { border-top: none; padding-top: 0; }
+.m-sec label.switch {
+  display: flex; flex-direction: row-reverse; align-items: center; justify-content: space-between; gap: 14px;
+  padding: 13px 0; margin: 0; cursor: pointer;
+}
+.m-sec label.switch > span { flex: 1; display: flex; flex-direction: column; gap: 3px; font-size: 15px; }
+.m-sub-hint { font-size: 12px; color: var(--muted); }
+.m-sec label.switch input[type="checkbox"] {
+  appearance: none; -webkit-appearance: none; flex: none;
+  width: 46px; height: 28px; margin: 0; border-radius: 999px;
+  background: var(--track); border: 1px solid var(--panel-line);
+  position: relative; transition: background 160ms ease; cursor: pointer;
+}
+.m-sec label.switch input[type="checkbox"]::after {
+  content: ''; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%;
+  background: #fff; box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35); transition: transform 160ms ease;
+}
+.m-sec label.switch input[type="checkbox"]:checked { background: linear-gradient(120deg, var(--accent), var(--accent-2)); border-color: transparent; }
+.m-sec label.switch input[type="checkbox"]:checked::after { transform: translateX(18px); }
+.m-row { display: flex; align-items: center; gap: 12px; width: 100%; padding: 13px 0; border: none; background: transparent; color: var(--text); text-align: left; cursor: pointer; }
+.m-row .row-main { flex: 1; min-width: 0; }
+.m-row .row-title { font-size: 15px; font-weight: 600; }
+.m-row:active { opacity: 0.7; }
+.m-sec .m-reset { margin: 10px 0 6px; width: 100%; }
+.m-sec-title { margin: 14px 4px -2px; }
+.m-sec .m-link-row { margin: 0; padding: 13px 0; }
+.m-sec > .m-row:not(:first-child) { border-top: 1px solid var(--line-soft); }
+
+/* пинг значками */
+.m-bars { display: inline-flex; align-items: flex-end; gap: 2px; height: 22px; padding: 4px 9px; }
+.m-bars i { width: 4px; border-radius: 2px; background: var(--ring); }
+.m-bars i:nth-child(1) { height: 5px; } .m-bars i:nth-child(2) { height: 9px; } .m-bars i:nth-child(3) { height: 13px; }
+.m-bars.is-fast i.on { background: #35D07F; } .m-bars.is-mid i.on { background: #E5A54B; } .m-bars.is-bad i.on { background: #FF5C74; }
+.m-bars.is-bad i:not(.on) { background: rgba(255, 92, 116, 0.25); }
+
+/* логотип вместо надписи в шапке */
+.m-brand { display: flex; align-items: center; justify-content: center; }
+.m-brand-logo { height: 30px; width: auto; display: block; pointer-events: none; }
+.is-android #home-mode { display: none !important; }
+.is-android .orb, .is-android .orb-core { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }

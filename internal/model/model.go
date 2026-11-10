@@ -2,7 +2,8 @@ package model
 
 import "time"
 
-const AppVersion = "ms7.vs2.6"
+// AppVersion — var, а не const: сборка для Android подставляет свою версию через -ldflags -X.
+var AppVersion = "ms7.vs2.7"
 
 type UserInfo struct {
 	UploadBytes   int64 `json:"uploadBytes,omitempty"`
@@ -98,6 +99,21 @@ type Settings struct {
 	// системного прокси задаёт HTTP_PROXY/HTTPS_PROXY пользователя. Node.js,
 	// git, curl и Claude Code системный прокси Windows не читают.
 	ConsoleProxy bool `json:"consoleProxy"`
+
+	// Настройки телефона (Android), как в Happ. На Windows не используются.
+	// PerAppMode — прокси для выбранных приложений: off — через VPN все,
+	// on — только выбранные (DirectApps), bypass или пусто — выбранные мимо VPN.
+	PerAppMode     string `json:"perAppMode,omitempty"`
+	RefreshOnStart bool   `json:"refreshOnStart,omitempty"` // обновлять подписки при запуске
+	NoSniffing     bool   `json:"noSniffing,omitempty"`     // не определять домены в трафике
+	TunMTU         int    `json:"tunMtu,omitempty"`         // MTU туннеля, 0 — 1500
+	AllowLAN       bool   `json:"allowLan,omitempty"`       // SOCKS/HTTP доступны устройствам в сети
+	AutoConnectType string `json:"autoConnectType,omitempty"` // last (по умолчанию) | fastest
+	Fragment       bool   `json:"fragment,omitempty"`       // дробить TLS ClientHello (обход DPI)
+	Mux            bool   `json:"mux,omitempty"`            // мультиплексирование (не для flow/XHTTP)
+	DomainStrategy string `json:"domainStrategy,omitempty"` // AsIs | IPIfNonMatch | IPOnDemand
+	NoRouting      bool   `json:"noRouting,omitempty"`      // не применять правила «Без VPN»
+	NoHWID         bool   `json:"noHwid,omitempty"`         // не отправлять HWID серверу подписки
 }
 
 // Способ проверки пинга.

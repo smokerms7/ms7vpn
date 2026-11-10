@@ -16,3 +16,4 @@ env*.txt
 state.json
 proxy-backup.json
 device.id
+dist-test/

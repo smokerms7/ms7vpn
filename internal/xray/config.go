@@ -187,7 +187,7 @@ func Build(node model.Node, options ConfigOptions) (BuildResult, error) {
 	if userRulesNeedGeo(options.DirectDomains, options.ProxyDomains, geo) {
 		warnings = append(warnings, "Правила geosite/geoip пропущены: рядом с xray.exe нет geosite.dat или geoip.dat (они есть в полной установке)")
 	}
-	outbounds := buildOutbounds(outbound)
+	outbounds := applyTransportExtras(buildOutbounds(outbound))
 	if options.NativeTun {
 		direct := outbounds[1].(map[string]any)
 		if options.SendThrough != "" {
@@ -206,8 +206,8 @@ func Build(node model.Node, options ConfigOptions) (BuildResult, error) {
 			"tag": "tun-in", "protocol": "tun",
 			// Адрес адаптеру ставит само ядро сразу после создания: без него
 			// Windows выдаёт 169.254.x.x и трафик идёт не сразу.
-			"settings": map[string]any{"name": tunName(options.TunName), "mtu": 9000, "gateway": []string{"198.18.0.1/30"}},
-			"sniffing": map[string]any{"enabled": true, "destOverride": []string{"http", "tls", "quic"}, "routeOnly": true},
+			"settings": map[string]any{"name": tunName(options.TunName), "mtu": TunMTU, "gateway": []string{"198.18.0.1/30"}},
+			"sniffing": sniffing("http", "tls", "quic"),
 		}
 		inbounds = append([]any{tun}, inbounds...)
 	}
@@ -292,14 +292,14 @@ func buildInbounds(options ConfigOptions) []any {
 
 	return []any{
 		map[string]any{
-			"tag": "socks-in", "listen": "127.0.0.1", "port": options.SOCKSPort, "protocol": "socks",
+			"tag": "socks-in", "listen": InboundListen, "port": options.SOCKSPort, "protocol": "socks",
 			"settings": map[string]any{"auth": "noauth", "udp": true, "ip": "127.0.0.1"},
-			"sniffing": map[string]any{"enabled": true, "destOverride": []string{"http", "tls", "quic"}, "routeOnly": true},
+			"sniffing": sniffing("http", "tls", "quic"),
 		},
 		map[string]any{
-			"tag": "http-in", "listen": "127.0.0.1", "port": options.HTTPPort, "protocol": "http",
+			"tag": "http-in", "listen": InboundListen, "port": options.HTTPPort, "protocol": "http",
 			"settings": map[string]any{"allowTransparent": false},
-			"sniffing": map[string]any{"enabled": true, "destOverride": []string{"http", "tls"}, "routeOnly": true},
+			"sniffing": sniffing("http", "tls"),
 		},
 	}
 }
@@ -382,9 +382,31 @@ func buildRouting(options ConfigOptions, blockAds, useGeoIP bool, geo geoAvailab
 			})
 		}
 	}
-	// IPIfNonMatch — как в рабочей сборке. Менять эту стратегию без проверки
-	// на живом подключении нельзя: от неё зависит и маршрутизация, и DNS.
-	return map[string]any{"domainStrategy": "IPIfNonMatch", "rules": rules}
+	return map[string]any{"domainStrategy": routingStrategyFor(rules), "rules": rules}
+}
+
+// routingStrategyFor выбирает стратегию, если пользователь её не задал.
+// IPIfNonMatch заставляет Xray перед каждым новым доменом спрашивать DNS
+// (а DNS идёт через сервер) — лишний круг до сервера на каждый сайт, отсюда
+// «тугое» соединение. Резолв нужен, только когда есть IP-правила кроме
+// локальных сетей (geoip:ru, IP/geoip из списков пользователя); иначе AsIs:
+// трафик из TUN и так приходит с IP, а домены локалки ловит правило domain.
+func routingStrategyFor(rules []any) string {
+	if DomainStrategy != "" {
+		return routingStrategy()
+	}
+	for _, r := range rules {
+		rule, _ := r.(map[string]any)
+		ips, ok := rule["ip"].([]string)
+		if !ok || len(ips) == 0 {
+			continue
+		}
+		if len(ips) == len(privateRanges) && ips[0] == privateRanges[0] {
+			continue
+		}
+		return "IPIfNonMatch"
+	}
+	return "AsIs"
 }
 
 // processNames — имена программ для правила process. Xray сравнивает с

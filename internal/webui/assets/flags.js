@@ -103,16 +103,20 @@
     return '';
   }
 
+  // Настоящие флаги всех стран — SVG из flag-icons (MIT), папка flags/.
+  const REAL = new Set(["AD","AE","AF","AG","AI","AL","AM","AO","AQ","AR","AS","AT","AU","AW","AX","AZ","BA","BB","BD","BE","BF","BG","BH","BI","BJ","BL","BM","BN","BO","BQ","BR","BS","BT","BV","BW","BY","BZ","CA","CC","CD","CF","CG","CH","CI","CK","CL","CM","CN","CO","CP","CR","CU","CV","CW","CX","CY","CZ","DE","DG","DJ","DK","DM","DO","DZ","EC","EE","EG","EH","ER","ES","ET","EU","FI","FJ","FK","FM","FO","FR","GA","GB","GD","GE","GF","GG","GH","GI","GL","GM","GN","GP","GQ","GR","GS","GT","GU","GW","GY","HK","HM","HN","HR","HT","HU","IC","ID","IE","IL","IM","IN","IO","IQ","IR","IS","IT","JE","JM","JO","JP","KE","KG","KH","KI","KM","KN","KP","KR","KW","KY","KZ","LA","LB","LC","LI","LK","LR","LS","LT","LU","LV","LY","MA","MC","MD","ME","MF","MG","MH","MK","ML","MM","MN","MO","MP","MQ","MR","MS","MT","MU","MV","MW","MX","MY","MZ","NA","NC","NE","NF","NG","NI","NL","NO","NP","NR","NU","NZ","OM","PA","PC","PE","PF","PG","PH","PK","PL","PM","PN","PR","PS","PT","PW","PY","QA","RE","RO","RS","RU","RW","SA","SB","SC","SD","SE","SG","SH","SI","SJ","SK","SL","SM","SN","SO","SR","SS","ST","SV","SX","SY","SZ","TC","TD","TF","TG","TH","TJ","TK","TL","TM","TN","TO","TR","TT","TV","TW","TZ","UA","UG","UM","UN","US","UY","UZ","VA","VC","VE","VG","VI","VN","VU","WF","WS","XK","XX","YE","YT","ZA","ZM","ZW"]);
+  const known = (code) => REAL.has(code) || !!FLAGS[code];
+
   function countryCode(rawName) {
     const name = String(rawName || '');
     const emoji = fromEmoji(name);
-    if (emoji && FLAGS[emoji]) return emoji;
+    if (emoji && known(emoji)) return emoji;
     const lower = name.toLowerCase();
     for (const [word, code] of WORDS) {
       if (lower.includes(word)) return code;
     }
-    const match = name.match(/(?:^|[^A-Za-z])([A-Z]{2})(?![A-Za-z])/);
-    if (match && FLAGS[match[1]]) return match[1];
+    const match = name.match(/(?:^|[^A-Za-z0-9])([A-Z]{2})(?![A-Za-z0-9])/);
+    if (match && known(match[1])) return match[1];
     return '';
   }
 
@@ -127,6 +131,9 @@
 
   function flagHTML(rawName) {
     const code = countryCode(rawName);
+    if (code && REAL.has(code)) {
+      return `<span class="flag"><img src="flags/${code.toLowerCase()}.svg" alt="${code}" loading="lazy" draggable="false"></span>`;
+    }
     if (code && FLAGS[code]) {
       return `<span class="flag"><svg viewBox="0 0 30 20" preserveAspectRatio="none">${FLAGS[code]}</svg></span>`;
     }

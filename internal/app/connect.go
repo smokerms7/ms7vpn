@@ -259,6 +259,14 @@ func (a *App) Connect(parent context.Context, nodeID, mode string) (model.AppSta
 		checkCtx, cancel := context.WithTimeout(ctx, 18*time.Second)
 		err := xray.VerifyHTTPProxy(checkCtx, httpPort, settings.TestURL)
 		cancel()
+		// В TUN медленный ответ контрольного адреса не повод рвать уже
+		// поднятый туннель: если сервер хоть что-то передаёт, остаёмся
+		// подключёнными с предупреждением (Happ ведёт себя так же).
+		if err != nil && nativeTun && ctx.Err() == nil && warmUp(ctx, httpPort, 4*time.Second) {
+			a.logf("контрольная проверка не прошла (%v), но канал отвечает — остаюсь подключённым", err)
+			warnings = append(warnings, "Сервер отвечает медленно. Если сайты не открываются — выберите другой сервер.")
+			err = nil
+		}
 		if err != nil {
 			return fail(fmt.Errorf("проверка через %s: %w", settings.Engine, err))
 		}

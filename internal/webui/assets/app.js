@@ -9,6 +9,9 @@
   const TOKEN = new URLSearchParams(location.search).get('token') || '';
   const AUTO_CONNECT = new URLSearchParams(location.search).get('autoconnect') || '';
   const BOT_URL = 'https://t.me/ms7vpn_bot';
+  // Сборка для Android (m/android.js): приложения вместо exe, без Windows-функций.
+  const IS_ANDROID = window.MS7_PLATFORM === 'android';
+  const appLabels = window.MS7AppLabels || {};
   const flags = window.MS7Flags;
   let device = null;
 
@@ -308,7 +311,7 @@
     else if (connecting) line = connection.statusMessage || 'Подключаемся…';
     else if (problem) line = problem;
     else if (isZapret()) line = 'Обход DPI без сервера: пинг родной, подписка не тратится';
-    else if (!(state.subscriptions || []).length) line = 'Добавьте подписку — Ctrl+V с ссылкой в буфере';
+    else if (!(state.subscriptions || []).length) line = IS_ANDROID ? 'Добавьте подписку в разделе «Подписки»' : 'Добавьте подписку — Ctrl+V с ссылкой в буфере';
     else line = 'Нажмите, чтобы подключиться';
     setText(subtxt, line);
     subtxt.hidden = !line;
@@ -608,7 +611,7 @@
     } else if (connecting) {
       sub = 'Подключаемся…';
     } else if (!(state.subscriptions || []).length) {
-      sub = 'Добавьте подписку — нажмите Ctrl+V с ссылкой в буфере';
+      sub = IS_ANDROID ? 'Добавьте подписку — ссылка из бота' : 'Добавьте подписку — нажмите Ctrl+V с ссылкой в буфере';
     } else {
       sub = 'Нажмите кнопку, чтобы подключиться';
     }
@@ -786,7 +789,7 @@
       ? `Загрузка ядра… ${core.progress || 0}%`
       : core.installed ? 'Выбранное ядро установлено' : 'Ядро загрузится при первом подключении';
     $('info-device').textContent = (device && device.deviceName) || '—';
-    $('info-os').textContent = (device && device.osName) || 'Windows';
+    $('info-os').textContent = (device && device.osName) || (IS_ANDROID ? 'Android' : 'Windows');
     $('info-id').textContent = (device && device.deviceId) || '—';
   }
 
@@ -996,7 +999,8 @@
   }
 
   function canHold() {
-    return state && !isZapret() && !state.connection.connected && !state.connection.connecting && !fastestRunning && allNodes().some((n) => n.supported);
+    // На телефоне удержание работает и при включённом VPN — переключит на самый быстрый.
+    return state && !isZapret() && (IS_ANDROID || !state.connection.connected) && !state.connection.connecting && !fastestRunning && allNodes().some((n) => n.supported);
   }
 
   $('power-btn').addEventListener('pointerdown', (event) => {
@@ -1008,11 +1012,14 @@
       setTimeout(() => {
         holdFired = true;
         clearHold();
+        try { if (navigator.vibrate) navigator.vibrate(30); } catch (_) { /* без вибрации */ }
         fastest(true);
       }, HOLD_MS)
     );
   });
   ['pointerup', 'pointerleave', 'pointercancel'].forEach((name) => $('power-btn').addEventListener(name, clearHold));
+  // Долгое нажатие на телефоне не должно открывать системное меню.
+  $('power-btn').addEventListener('contextmenu', (event) => event.preventDefault());
 
   $('power-btn').addEventListener('click', () => {
     if (holdFired) { holdFired = false; return; }
@@ -1076,7 +1083,8 @@
       state = await api('/api/nodes/ping', { method: 'POST', body: { subscriptionId: '', nodeIds: [] } });
       const engine = (state.settings || {}).engine || 'xray';
       const activeId = activeSubId();
-      const candidates = allNodes().filter((n) => (!activeId || n.subId === activeId) && n.supported && n.pingStatus === 'ok' && n.pingMs > 0 &&
+      // На телефоне — по всем серверам всех подписок.
+      const candidates = allNodes().filter((n) => (IS_ANDROID || !activeId || n.subId === activeId) && n.supported && n.pingStatus === 'ok' && n.pingMs > 0 &&
         !(engine === 'xray' && n.protocol === 'hysteria2'));
       candidates.sort((a, b) => a.pingMs - b.pingMs);
       best = candidates[0] || null;
@@ -1345,7 +1353,7 @@
         stopUpdatePolling();
         $('update-banner').hidden = true;
         showUpdateState('new', 'Запуск установщика',
-          'Программа закроется, дальше всё сделает установщик.');
+          IS_ANDROID ? 'Подтвердите установку в окне Android.' : 'Программа закроется, дальше всё сделает установщик.');
         return;
       }
       if (progress.message) {
@@ -2074,9 +2082,9 @@
 
   function appIconHTML(exe) {
     const brand = brandFor(exe);
-    const fallback = brand
-      ? `<span class="app-fb" style="background:${brand.hex}"><svg viewBox="0 0 24 24"><path d="${brand.d}"/></svg></span>`
-      : `<span class="app-fb app-letter">${escapeHtml(exe.split('\\').pop().slice(0, 1).toUpperCase())}</span>`;
+    const fallback = brand && brand.d
+      ?`<span class="app-fb" style="background:${brand.hex}"><svg viewBox="0 0 24 24"><path d="${brand.d}"/></svg></span>`
+      : `<span class="app-fb app-letter"${brand && brand.hex ? ` style="background:${brand.hex}"` : ''}>${escapeHtml(appDisplayName(exe).slice(0, 1).toUpperCase())}</span>`;
     const src = '/api/appicon?name=' + encodeURIComponent(exe) + '&token=' + encodeURIComponent(TOKEN);
     return `<span class="app-ic"><img class="app-img" src="${escapeHtml(src)}" alt="" loading="lazy">${fallback}</span>`;
   }
@@ -2090,6 +2098,7 @@
   function appDisplayName(exe) {
     const brand = brandFor(exe);
     if (brand) return brand.name;
+    if (IS_ANDROID) return appLabels[exe] || exe.split('.').pop();
     const base = exe.split('\\').pop().replace(/\.exe$/i, '');
     return base.charAt(0).toUpperCase() + base.slice(1);
   }
@@ -2141,7 +2150,7 @@
   function addTypedApp() {
     const value = $('app-input').value.trim().replace(/^"|"$/g, '');
     if (!value) { toast('Введите имя программы, например game.exe'); return; }
-    toggleApp(/\.exe$/i.test(value) ? value : value + '.exe', true);
+    toggleApp(IS_ANDROID || /\.exe$/i.test(value) ? value : value + '.exe', true);
     $('app-input').value = '';
   }
   $('app-add').addEventListener('click', addTypedApp);
@@ -2165,6 +2174,7 @@
     try {
       const data = await api('/api/processes');
       runningApps = (data && data.processes) || [];
+      if (data && data.labels) Object.assign(appLabels, data.labels);
     } catch (error) {
       toast(error.message, 'err');
     }
@@ -2174,7 +2184,7 @@
   $('proc-toggle').addEventListener('click', () => {
     const box = $('apps-procs');
     box.hidden = !box.hidden;
-    setText($('proc-toggle'), box.hidden ? 'Из запущенных' : 'Скрыть запущенные');
+    setText($('proc-toggle'), IS_ANDROID ? (box.hidden ? 'Из установленных' : 'Скрыть список') : (box.hidden ? 'Из запущенных' : 'Скрыть запущенные'));
     if (!box.hidden) { renderProcesses(); loadProcesses(); }
   });
   $('apps-procs').addEventListener('click', (event) => {

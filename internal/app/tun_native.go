@@ -22,6 +22,13 @@ import (
 // неудачи. Теперь: один процесс Xray с входом tun, маршруты и DNS — быстрыми
 // route/netsh (пакет tunnet).
 
+// platformStartTun/platformStopTun — TUN другой платформы (Android:
+// VpnService). Заданы — Windows-ветка (wintun, route/netsh) не используется.
+var (
+	platformStartTun func(a *App, ctx context.Context, p nativeTunParams) ([]string, error)
+	platformStopTun  func()
+)
+
 func tunBypassPath(dataDir string) string { return filepath.Join(dataDir, "tun-bypass.json") }
 
 // saveTunBypass запоминает обходные маршруты на диск: если программу убьют,
@@ -36,6 +43,9 @@ func (a *App) saveTunBypass(ips []string) {
 
 // cleanupNativeTun снимает маршруты сеанса. Безопасно вызывать всегда.
 func (a *App) cleanupNativeTun() {
+	if platformStopTun != nil {
+		platformStopTun()
+	}
 	a.tunMu.Lock()
 	ips := a.tunBypass
 	a.tunBypass = nil
@@ -98,6 +108,9 @@ type nativeTunParams struct {
 
 // startNativeTun поднимает туннель. Возвращает предупреждения для окна.
 func (a *App) startNativeTun(ctx context.Context, p nativeTunParams) ([]string, error) {
+	if platformStartTun != nil {
+		return platformStartTun(a, ctx, p)
+	}
 	t0 := time.Now()
 	ips := tunnet.ResolveIPv4All(ctx, p.node.Address)
 	if len(ips) == 0 {
@@ -136,7 +149,7 @@ func (a *App) startNativeTun(ctx context.Context, p nativeTunParams) ([]string, 
 	for attempt := 0; ; attempt++ {
 		startErr := a.core.Start(built.Config, "tun")
 		if startErr == nil {
-			startErr = a.waitTunAdapter(ctx, adapter, 4*time.Second)
+			startErr = a.waitTunAdapter(ctx, adapter, 2500*time.Millisecond)
 		}
 		if startErr == nil {
 			break
@@ -145,11 +158,12 @@ func (a *App) startNativeTun(ctx context.Context, p nativeTunParams) ([]string, 
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		// Повторы: то же имя, затем каждое запасное по разу.
+		// Повторы: сразу запасное имя (старое Windows может отпускать
+		// секундами), последний — снова основное.
 		if attempt < len(xray.TunAdapterNames) && transientTunStart(startErr) {
-			tunnet.WaitAdapterGone(adapter, 3*time.Second)
-			if attempt >= 1 {
-				adapter = xray.TunAdapterNames[attempt]
+			tunnet.WaitAdapterGone(adapter, 1500*time.Millisecond)
+			if next := xray.TunAdapterNames[(attempt+1)%len(xray.TunAdapterNames)]; next != adapter {
+				adapter = next
 				var buildErr error
 				if built, buildErr = build(adapter); buildErr != nil {
 					return nil, buildErr

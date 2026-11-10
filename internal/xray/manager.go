@@ -49,6 +49,9 @@ type Manager struct {
 	logFile  *os.File
 	exited   chan struct{}
 	onUpdate func(Progress)
+	// tunFile — дескриптор TUN от Android VpnService. Передаётся ядру
+	// третьим дескриптором (fd 3), см. SetTunFile.
+	tunFile *os.File
 }
 
 func NewManager(dataDir string, onUpdate func(Progress)) *Manager {
@@ -57,6 +60,9 @@ func NewManager(dataDir string, onUpdate func(Progress)) *Manager {
 	// берём их оттуда и ничего не скачиваем.
 	if bundled, ok := bundledCoreDir(); ok {
 		coreDir = bundled
+	}
+	if CoreDirOverride != "" {
+		coreDir = CoreDirOverride
 	}
 	return &Manager{
 		dataDir:  dataDir,
@@ -83,7 +89,12 @@ func bundledCoreDir() (string, bool) {
 	return "", false
 }
 
-func (m *Manager) CorePath() string   { return filepath.Join(m.coreDir, executableName()) }
+func (m *Manager) CorePath() string {
+	if CoreBinaryOverride != "" {
+		return CoreBinaryOverride
+	}
+	return filepath.Join(m.coreDir, executableName())
+}
 func (m *Manager) CoreDir() string    { return m.coreDir }
 func (m *Manager) RuntimeDir() string { return m.runDir }
 
@@ -215,7 +226,7 @@ func (m *Manager) Start(config []byte, mode string) error {
 	if !m.Installed() {
 		return errors.New("Xray-core не установлен")
 	}
-	if strings.EqualFold(mode, "tun") && !m.HasWintun() {
+	if strings.EqualFold(mode, "tun") && CoreBinaryOverride == "" && !m.HasWintun() {
 		return errors.New("рядом с xray.exe не найден wintun.dll")
 	}
 	if err := os.MkdirAll(m.runDir, 0o700); err != nil {
@@ -239,6 +250,11 @@ func (m *Manager) Start(config []byte, mode string) error {
 	command.Stdout = logFile
 	command.Stderr = logFile
 	configureHiddenProcess(command)
+	if m.tunFile != nil && strings.EqualFold(mode, "tun") {
+		// Android: ядро читает TUN из унаследованного дескриптора.
+		command.ExtraFiles = []*os.File{m.tunFile}
+		command.Env = append(os.Environ(), "xray.tun.fd=3", "XRAY_TUN_FD=3")
+	}
 	if err := command.Start(); err != nil {
 		_ = logFile.Close()
 		return fmt.Errorf("запуск Xray: %w", err)

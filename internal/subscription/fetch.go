@@ -50,6 +50,14 @@ func NewFetcher(dataDir string) *Fetcher {
 	}
 }
 
+// Что сообщается серверу подписки. Сборка для Android меняет на свои значения.
+var (
+	SendHWID        = true
+	DeviceOS        = "Windows"
+	DeviceOSVersion = "Windows 10/11"
+	DeviceModel     = "MS7VPN Desktop"
+)
+
 func loadOrCreateDeviceID(dataDir string) string {
 	path := filepath.Join(dataDir, "device.id")
 	if data, err := os.ReadFile(path); err == nil {
@@ -101,10 +109,12 @@ func (f *Fetcher) Fetch(ctx context.Context, source string) (FetchResult, error)
 			return FetchResult{}, reqErr
 		}
 		request.Header.Set("User-Agent", userAgent)
-		request.Header.Set("X-Hwid", f.DeviceID)
-		request.Header.Set("X-Device-Os", "Windows")
-		request.Header.Set("X-Ver-Os", "Windows 10/11")
-		request.Header.Set("X-Device-Model", "MS7VPN Desktop")
+		if SendHWID {
+			request.Header.Set("X-Hwid", f.DeviceID)
+			request.Header.Set("X-Device-Os", DeviceOS)
+			request.Header.Set("X-Ver-Os", DeviceOSVersion)
+			request.Header.Set("X-Device-Model", DeviceModel)
+		}
 		request.Header.Set("Accept", "text/plain, application/json, */*")
 		request.Header.Set("Cache-Control", "no-cache")
 
