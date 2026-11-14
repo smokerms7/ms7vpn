@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -23,6 +22,9 @@ type Fetcher struct {
 	Client   *http.Client
 	DeviceID string
 	DataDir  string
+	// DirectDialer, если задан, отдаёт соединение мимо VPN-туннеля или nil,
+	// когда туннеля нет. Через него подписка качается в разы быстрее.
+	DirectDialer func(ctx context.Context) DialFunc
 }
 
 type FetchResult struct {
@@ -102,38 +104,55 @@ func (f *Fetcher) Fetch(ctx context.Context, source string) (FetchResult, error)
 		"Happ/4.3.0",
 		"Happ/4.2.1",
 	}
-	var response *http.Response
-	for attempt, userAgent := range userAgents {
-		request, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, source, nil)
-		if reqErr != nil {
-			return FetchResult{}, reqErr
-		}
-		request.Header.Set("User-Agent", userAgent)
-		if SendHWID {
-			request.Header.Set("X-Hwid", f.DeviceID)
-			request.Header.Set("X-Device-Os", DeviceOS)
-			request.Header.Set("X-Ver-Os", DeviceOSVersion)
-			request.Header.Set("X-Device-Model", DeviceModel)
-		}
-		request.Header.Set("Accept", "text/plain, application/json, */*")
-		request.Header.Set("Cache-Control", "no-cache")
+	// Срок, лимит и статус панель отдаёт отдельным адресом. Раньше его
+	// спрашивали после списка серверов, и обновление ждало ещё 2–5 с; теперь
+	// оба запроса идут одновременно.
+	type infoResult struct {
+		parsed infoResponse
+		ok     bool
+	}
+	infoDone := make(chan infoResult, 1)
+	infoCtx, cancelInfo := context.WithTimeout(ctx, 8*time.Second)
+	defer cancelInfo()
+	go func() {
+		parsed, ok := f.lookupInfo(infoCtx, source)
+		infoDone <- infoResult{parsed, ok}
+	}()
 
-		response, err = f.Client.Do(request)
+	var response *http.Response
+	var body []byte
+	for attempt, userAgent := range userAgents {
+		build := func(reqCtx context.Context) (*http.Request, error) {
+			request, reqErr := http.NewRequestWithContext(reqCtx, http.MethodGet, source, nil)
+			if reqErr != nil {
+				return nil, reqErr
+			}
+			request.Header.Set("User-Agent", userAgent)
+			if SendHWID {
+				request.Header.Set("X-Hwid", f.DeviceID)
+				request.Header.Set("X-Device-Os", DeviceOS)
+				request.Header.Set("X-Ver-Os", DeviceOSVersion)
+				request.Header.Set("X-Device-Model", DeviceModel)
+			}
+			request.Header.Set("Accept", "text/plain, application/json, */*")
+			request.Header.Set("Cache-Control", "no-cache")
+			return request, nil
+		}
+		response, body, err = f.get(ctx, build, maxSubscriptionBytes+1)
 		if err != nil {
 			return FetchResult{}, fmt.Errorf("не удалось скачать подписку: %w", err)
 		}
 		if response.StatusCode != http.StatusForbidden || attempt == len(userAgents)-1 {
 			break
 		}
-		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 2048))
-		_ = response.Body.Close()
 	}
 	if response == nil {
 		return FetchResult{}, fmt.Errorf("сервер подписки не ответил")
 	}
-	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(response.Body, 2048))
+		if len(body) > 2048 {
+			body = body[:2048]
+		}
 		message := strings.TrimSpace(string(body))
 		if response.StatusCode == http.StatusForbidden {
 			if message == "" {
@@ -148,10 +167,6 @@ func (f *Fetcher) Fetch(ctx context.Context, source string) (FetchResult, error)
 	}
 	if strings.EqualFold(response.Header.Get("x-hwid-not-supported"), "true") {
 		return FetchResult{}, fmt.Errorf("сервер требует HWID-идентификацию устройства, но отклонил текущий идентификатор")
-	}
-	body, err := io.ReadAll(io.LimitReader(response.Body, maxSubscriptionBytes+1))
-	if err != nil {
-		return FetchResult{}, fmt.Errorf("чтение подписки: %w", err)
 	}
 	if len(body) > maxSubscriptionBytes {
 		return FetchResult{}, fmt.Errorf("подписка больше 8 МБ")
@@ -176,9 +191,13 @@ func (f *Fetcher) Fetch(ctx context.Context, source string) (FetchResult, error)
 	// Заголовок обычно содержит только израсходованный трафик. Срок действия,
 	// лимит и статус панель отдаёт отдельным адресом, поэтому спрашиваем и его.
 	info := ParseSubscriptionUserInfo(firstHeader(response.Header, "subscription-userinfo"))
-	infoCtx, cancelInfo := context.WithTimeout(ctx, 10*time.Second)
-	info = f.FetchInfo(infoCtx, response.Request.URL.String(), info)
-	cancelInfo()
+	select {
+	case extra := <-infoDone:
+		if extra.ok {
+			info = mergeInfo(info, extra.parsed)
+		}
+	case <-infoCtx.Done():
+	}
 
 	return FetchResult{
 		Name:                  name,

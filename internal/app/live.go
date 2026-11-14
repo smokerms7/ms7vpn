@@ -16,13 +16,15 @@ import (
 // после первого замера в цифру входит только путь до сервера и обратно, а не
 // каждый раз новое рукопожатие TLS.
 func (a *App) livePingLoop() {
+	// Тик частый, замер — раз в interval или сразу на новом подключении.
 	const interval = 4 * time.Second
-	ticker := time.NewTicker(interval)
+	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 
 	var (
 		client   *http.Client
 		clientID string
+		lastAt   time.Time
 	)
 	for {
 		select {
@@ -46,7 +48,11 @@ func (a *App) livePingLoop() {
 		// sing-box в TUN не открывает HTTP-вход: запрос и так идёт в туннель.
 		useProxy := !(conn.Engine == "sing-box" && conn.Mode == "tun") && httpPort > 0
 		id := fmt.Sprintf("%s|%s|%s|%d|%v", conn.NodeID, conn.Engine, conn.Mode, httpPort, conn.StartedAt.UnixNano())
-		if client == nil || id != clientID {
+		fresh := client == nil || id != clientID
+		if !fresh && time.Since(lastAt) < interval {
+			continue
+		}
+		if fresh {
 			if client != nil {
 				client.CloseIdleConnections()
 			}
@@ -63,7 +69,14 @@ func (a *App) livePingLoop() {
 		if testURL == "" {
 			testURL = model.DefaultSettings().TestURL
 		}
+		if fresh {
+			// Прогрев: первый запрос открывает соединение через сервер, и в
+			// его цифре рукопожатия — на экране она выглядела в 3–5 раз хуже
+			// настоящей. Показываем уже второй.
+			measureDelay(client, testURL)
+		}
 		ms := measureDelay(client, testURL)
+		lastAt = time.Now()
 
 		a.mu.Lock()
 		if a.state.Connection.Connected && a.state.Connection.NodeID == conn.NodeID {

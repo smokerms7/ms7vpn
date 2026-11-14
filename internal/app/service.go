@@ -436,15 +436,19 @@ func (a *App) autoRefreshLoop() {
 		case <-ticker.C:
 		}
 		snapshot := a.Snapshot()
-		if !snapshot.Settings.AutoRefresh {
+		force := a.refreshAllOnce.Swap(false)
+		if !snapshot.Settings.AutoRefresh && !force {
 			continue
+		}
+		if force {
+			a.logf("новая версия программы: обновляю подписки")
 		}
 		for _, sub := range snapshot.Subscriptions {
 			interval := sub.UpdateIntervalMinutes
 			if interval <= 0 {
 				interval = defaultRefreshMinutes
 			}
-			if time.Since(sub.UpdatedAt) < time.Duration(interval)*time.Minute {
+			if !force && time.Since(sub.UpdatedAt) < time.Duration(interval)*time.Minute {
 				continue
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)

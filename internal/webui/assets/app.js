@@ -298,7 +298,7 @@
     }
 
     renderSpeed(connection, connected);
-    renderGreeting(connected, connecting, selected);
+    renderHomeActs();
     renderQuick();
 
 
@@ -597,26 +597,100 @@
   }
   window.addEventListener('resize', () => drawChart());
 
-  /* ==== приветствие ==== */
-  function renderGreeting(connected, connecting, selected) {
-    const hour = new Date().getHours();
-    const title = hour < 5 ? 'Доброй ночи' : hour < 12 ? 'Доброе утро' : hour < 18 ? 'Добрый день' : 'Добрый вечер';
-    setText($('greet-title'), title + ' 👋');
-    let sub;
-    if (isZapret()) {
-      sub = connected ? 'Обход блокировок работает — трафик идёт напрямую' : 'Режим «Запрет»: обход без сервера';
-    } else if (connected) {
-      const where = selected ? nodeName(selected) : 'сервер';
-      sub = 'Соединение защищено · ' + where;
-    } else if (connecting) {
-      sub = 'Подключаемся…';
-    } else if (!(state.subscriptions || []).length) {
-      sub = IS_ANDROID ? 'Добавьте подписку — ссылка из бота' : 'Добавьте подписку — нажмите Ctrl+V с ссылкой в буфере';
-    } else {
-      sub = 'Нажмите кнопку, чтобы подключиться';
-    }
-    setText($('greet-sub'), sub);
+  /* ==== кнопки «Обновить» и «Пинг» на главной ==== */
+  // Свои флаги вместо общего busy: проверка пинга идёт секунд десять, и всё
+  // это время кнопка подключения должна оставаться живой.
+  const homeActs = { refreshing: false, pinging: false };
+
+  function agoText(value) {
+    const time = Date.parse(value || '');
+    if (!time || Number.isNaN(time)) return '';
+    const minutes = Math.max(0, Math.round((Date.now() - time) / 60000));
+    if (minutes < 1) return 'только что';
+    if (minutes < 60) return minutes + ' мин назад';
+    const hours = Math.round(minutes / 60);
+    if (hours < 24) return hours + ' ч назад';
+    return shortDate(value);
   }
+
+  function pingScope() {
+    const activeId = IS_ANDROID ? '' : activeSubId();
+    return allNodes().filter((n) => n.supported && (!activeId || n.subId === activeId));
+  }
+
+  function renderHomeActs() {
+    const subs = state.subscriptions || [];
+    const refreshBtn = $('hact-refresh');
+    const pingBtn = $('hact-ping');
+    refreshBtn.classList.toggle('is-busy', homeActs.refreshing);
+    pingBtn.classList.toggle('is-busy', homeActs.pinging);
+    refreshBtn.disabled = !subs.length;
+    pingBtn.disabled = !subs.length;
+
+    let latest = '';
+    for (const sub of subs) if (sub.updatedAt && (!latest || sub.updatedAt > latest)) latest = sub.updatedAt;
+    setText($('hact-refresh-t'), homeActs.refreshing ? 'Обновляем…' : 'Обновить');
+    setText($('hact-refresh-s'), homeActs.refreshing ? 'скачиваем подписку' : latest ? 'обновлено ' + agoText(latest) : 'подписку');
+
+    const checked = pingScope().filter((n) => n.pingStatus === 'ok' && n.pingMs > 0);
+    let pingSub = 'проверить серверы';
+    const pingSmall = $('hact-ping-s');
+    pingSmall.className = 'hact-s';
+    if (homeActs.pinging) {
+      pingSub = 'меряем задержку';
+    } else if (checked.length) {
+      const best = checked.reduce((a, b) => (b.pingMs < a.pingMs ? b : a));
+      pingSub = 'лучший ' + best.pingMs + ' мс';
+      pingSmall.className = 'hact-s ' + pingClass(best);
+    }
+    setText($('hact-ping-t'), homeActs.pinging ? 'Проверяем…' : 'Пинг');
+    setText(pingSmall, pingSub);
+  }
+
+  async function homeRefresh() {
+    if (homeActs.refreshing) return;
+    const ids = (state.subscriptions || []).map((sub) => sub.id);
+    if (!ids.length) {
+      toast('Сначала добавьте подписку', 'err');
+      return;
+    }
+    homeActs.refreshing = true;
+    renderHomeActs();
+    try {
+      await refreshSubscriptions(ids);
+    } catch (error) {
+      toast(error.message, 'err');
+    } finally {
+      homeActs.refreshing = false;
+      render();
+    }
+  }
+
+  async function homePing() {
+    if (homeActs.pinging) return;
+    const scope = pingScope();
+    if (!scope.length) {
+      toast('Нет серверов для проверки', 'err');
+      return;
+    }
+    homeActs.pinging = true;
+    renderHomeActs();
+    try {
+      const next = await api('/api/nodes/ping', { method: 'POST', body: { subscriptionId: '', nodeIds: scope.map((n) => n.id) } });
+      stateGeneration++;
+      state = next;
+      const alive = pingScope().filter((n) => n.pingStatus === 'ok' && n.pingMs > 0);
+      toast(alive.length ? 'Пинг проверен: отвечают ' + alive.length + ' из ' + scope.length : 'Ни один сервер не ответил', alive.length ? 'ok' : 'err');
+    } catch (error) {
+      toast(error.message, 'err');
+    } finally {
+      homeActs.pinging = false;
+      render();
+    }
+  }
+
+  $('hact-refresh').addEventListener('click', homeRefresh);
+  $('hact-ping').addEventListener('click', homePing);
 
   /* ==== быстрые действия и «Без VPN» на главной ==== */
   function renderQuick() {
@@ -875,12 +949,20 @@
       button.textContent = 'Обновляем…';
     }
     try {
-      let latest = state;
-      for (const id of ids) {
-        latest = await api('/api/subscriptions/refresh', { method: 'POST', body: { id } });
+      // Подписки обновляются одновременно, а не по очереди: при трёх
+      // подписках ожидание было втрое дольше. Каждый ответ содержит всё
+      // состояние; последний пришедший включает и все предыдущие.
+      let latest = null;
+      let failure = null;
+      await Promise.all(ids.map((id) => api('/api/subscriptions/refresh', { method: 'POST', body: { id } })
+        .then((next) => { latest = next; })
+        .catch((error) => { failure = failure || error; })));
+      if (latest) {
+        stateGeneration++;
+        state = latest;
       }
-      state = latest;
-      toast(describeRefresh(before, latest), 'ok');
+      if (failure && !latest) throw failure;
+      toast(describeRefresh(before, state) + (failure ? ' · ошибка: ' + failure.message : ''), failure ? 'err' : 'ok');
     } finally {
       if (button) {
         button.disabled = false;
@@ -1484,6 +1566,7 @@
 
     $('home-title').hidden = !isZapret();
     $('server-chip').hidden = isZapret();
+    $('home-acts').hidden = isZapret();
     $('speed-row').hidden = isZapret();
     $('zapret-row').hidden = !isZapret();
     const seg = $('home-mode');

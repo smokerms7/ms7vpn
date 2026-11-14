@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"ms7vpn/internal/model"
@@ -76,6 +77,14 @@ type App struct {
 
 	// Статистика по дням: трафик, время в VPN, подключения.
 	usage *usageBook
+
+	// Перекачать все подписки при первом тике autoRefreshLoop.
+	refreshAllOnce atomic.Bool
+
+	// Физический адаптер мимо туннелей (directnet.go).
+	ifaceMu   sync.Mutex
+	ifaceName string
+	ifaceAt   time.Time
 }
 
 // beginConnect регистрирует текущую попытку подключения и отменяет предыдущую.
@@ -126,6 +135,10 @@ func newApp(dataDir string, recoverNetwork bool) (*App, error) {
 		state = model.DefaultState()
 		state.Connection.LastError = err.Error()
 	}
+	// Новая версия могла научиться читать подписку полнее (в 2.8 — настройки
+	// XHTTP для обхода через CDN), поэтому после обновления подписки
+	// перекачиваются один раз, не дожидаясь их интервала.
+	upgraded := len(state.Subscriptions) > 0 && state.Version != model.AppVersion
 	state.Version = model.AppVersion
 	// Настройки с диска прогоняем через те же проверки, что и присланные из
 	// интерфейса: иначе один раз записанный чужой адрес обновлений жил бы до
@@ -147,6 +160,8 @@ func newApp(dataDir string, recoverNetwork bool) (*App, error) {
 		dataDir: dataDir, done: make(chan struct{}),
 		usage: loadUsage(dataDir),
 	}
+	application.refreshAllOnce.Store(upgraded)
+	application.fetcher.DirectDialer = application.directDialer
 	application.core = xray.NewManager(dataDir, application.onCoreProgress)
 	application.box = singbox.NewManager(dataDir, application.onCoreProgress)
 	application.zapret = zapret.NewManager(dataDir)

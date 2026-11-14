@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -22,18 +21,18 @@ import (
 type infoResponse struct {
 	IsFound bool `json:"isFound"`
 	User    struct {
-		Username             string `json:"username"`
-		UserStatus           string `json:"userStatus"`
-		Status               string `json:"status"`
-		IsActive             *bool  `json:"isActive"`
-		ExpiresAt            string `json:"expiresAt"`
-		ExpireAt             string `json:"expireAt"`
-		DaysLeft             *int   `json:"daysLeft"`
-		TrafficUsedBytes     any    `json:"trafficUsedBytes"`
-		TrafficLimitBytes    any    `json:"trafficLimitBytes"`
-		UsedTrafficBytes     any    `json:"usedTrafficBytes"`
-		TrafficLimit         any    `json:"trafficLimit"`
-		LifetimeUsedTraffic  any    `json:"lifetimeUsedTrafficBytes"`
+		Username            string `json:"username"`
+		UserStatus          string `json:"userStatus"`
+		Status              string `json:"status"`
+		IsActive            *bool  `json:"isActive"`
+		ExpiresAt           string `json:"expiresAt"`
+		ExpireAt            string `json:"expireAt"`
+		DaysLeft            *int   `json:"daysLeft"`
+		TrafficUsedBytes    any    `json:"trafficUsedBytes"`
+		TrafficLimitBytes   any    `json:"trafficLimitBytes"`
+		UsedTrafficBytes    any    `json:"usedTrafficBytes"`
+		TrafficLimit        any    `json:"trafficLimit"`
+		LifetimeUsedTraffic any    `json:"lifetimeUsedTrafficBytes"`
 	} `json:"user"`
 }
 
@@ -44,41 +43,57 @@ type infoResponse struct {
 // заголовок с израсходованным трафиком. Поэтому за сроком, лимитом и статусом
 // обращаемся так же, как это делает её собственная страница.
 func (f *Fetcher) FetchInfo(ctx context.Context, subscriptionURL string, base model.UserInfo) model.UserInfo {
-	endpoint := strings.TrimRight(strings.TrimSpace(subscriptionURL), "/")
-	if endpoint == "" || !strings.HasPrefix(endpoint, "http") {
-		return base
-	}
-	for _, candidate := range []string{endpoint + "/info", endpoint} {
-		if parsed, ok := f.requestInfo(ctx, candidate); ok {
-			return mergeInfo(base, parsed)
-		}
+	if parsed, ok := f.lookupInfo(ctx, subscriptionURL); ok {
+		return mergeInfo(base, parsed)
 	}
 	return base
 }
 
+// lookupInfo спрашивает «<ссылка>/info» и саму ссылку одновременно. Ответ
+// /info предпочтительнее: он ждётся, пока не придёт или не провалится.
+func (f *Fetcher) lookupInfo(ctx context.Context, subscriptionURL string) (infoResponse, bool) {
+	endpoint := strings.TrimRight(strings.TrimSpace(subscriptionURL), "/")
+	if endpoint == "" || !strings.HasPrefix(endpoint, "http") {
+		return infoResponse{}, false
+	}
+	type answer struct {
+		parsed infoResponse
+		ok     bool
+	}
+	candidates := []string{endpoint + "/info", endpoint}
+	answers := make([]chan answer, len(candidates))
+	for i, candidate := range candidates {
+		answers[i] = make(chan answer, 1)
+		go func(ch chan answer, url string) {
+			parsed, ok := f.requestInfo(ctx, url)
+			ch <- answer{parsed, ok}
+		}(answers[i], candidate)
+	}
+	for _, ch := range answers {
+		if a := <-ch; a.ok {
+			return a.parsed, true
+		}
+	}
+	return infoResponse{}, false
+}
+
 func (f *Fetcher) requestInfo(ctx context.Context, endpoint string) (infoResponse, bool) {
 	var parsed infoResponse
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return parsed, false
+	build := func(reqCtx context.Context) (*http.Request, error) {
+		request, err := http.NewRequestWithContext(reqCtx, http.MethodGet, endpoint, nil)
+		if err != nil {
+			return nil, err
+		}
+		request.Header.Set("Accept", "application/json")
+		// Представляемся браузером: именно так панель отдаёт полные данные.
+		request.Header.Set("User-Agent",
+			"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36")
+		request.Header.Set("X-Hwid", f.DeviceID)
+		request.Header.Set("X-MS7-Info", "1")
+		return request, nil
 	}
-	request.Header.Set("Accept", "application/json")
-	// Представляемся браузером: именно так панель отдаёт полные данные.
-	request.Header.Set("User-Agent",
-		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36")
-	request.Header.Set("X-Hwid", f.DeviceID)
-	request.Header.Set("X-MS7-Info", "1")
-
-	response, err := f.Client.Do(request)
-	if err != nil {
-		return parsed, false
-	}
-	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return parsed, false
-	}
-	body, err := io.ReadAll(io.LimitReader(response.Body, 256<<10))
-	if err != nil {
+	response, body, err := f.get(ctx, build, 256<<10)
+	if err != nil || response.StatusCode < 200 || response.StatusCode >= 300 {
 		return parsed, false
 	}
 	if json.Unmarshal(body, &parsed) != nil {

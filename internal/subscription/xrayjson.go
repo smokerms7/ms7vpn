@@ -157,7 +157,7 @@ func linkFromOutbound(outbound map[string]any, remarks string) string {
 		if users, _ := server["users"].([]any); len(users) > 0 {
 			if user, _ := users[0].(map[string]any); user != nil {
 				credentials = base64.RawURLEncoding.EncodeToString(
-					[]byte(asString(user["user"]) + ":" + asString(user["pass"]))) + "@"
+					[]byte(asString(user["user"])+":"+asString(user["pass"]))) + "@"
 			}
 		}
 		link := fmt.Sprintf("socks://%s%s:%d", credentials, address, port)
@@ -278,6 +278,16 @@ func streamQuery(stream map[string]any) url.Values {
 			setIfNotEmpty(query, "path", asString(settings["path"]))
 			setIfNotEmpty(query, "host", asString(settings["host"]))
 			setIfNotEmpty(query, "mode", asString(settings["mode"]))
+			// Тонкие настройки XHTTP (extra и прочие поля кроме path/host/
+			// mode) раньше терялись. Без них обход через Яндекс CDN не
+			// работал: CDN отвечает 413 на любой запрос с телом, и отправка
+			// должна идти GET-ом с данными в заголовках (uplinkHTTPMethod,
+			// uplinkDataPlacement, uplinkDataKey, scMaxEachPostBytes).
+			if extra := xhttpExtra(settings); len(extra) > 0 {
+				if data, err := json.Marshal(extra); err == nil {
+					query.Set("extra", string(data))
+				}
+			}
 		}
 	case "kcp", "mkcp":
 		if settings, _ := stream["kcpSettings"].(map[string]any); settings != nil {
@@ -317,4 +327,24 @@ func setIfNotEmpty(query url.Values, key, value string) {
 	if strings.TrimSpace(value) != "" {
 		query.Set(key, value)
 	}
+}
+
+// xhttpExtra собирает всё, что в xhttpSettings сверх адреса: объект extra и
+// поля, которые панель кладёт прямо в настройки (xPaddingBytes, noSSEHeader…).
+// Поля из extra главнее.
+func xhttpExtra(settings map[string]any) map[string]any {
+	extra := map[string]any{}
+	for key, value := range settings {
+		switch key {
+		case "path", "host", "mode", "extra":
+			continue
+		}
+		extra[key] = value
+	}
+	if nested, _ := settings["extra"].(map[string]any); nested != nil {
+		for key, value := range nested {
+			extra[key] = value
+		}
+	}
+	return extra
 }

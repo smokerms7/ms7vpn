@@ -43,9 +43,7 @@ func (a *App) realPing(ctx context.Context, nodes []model.Node, settings model.S
 
 	// Физический адаптер, чтобы проверка шла мимо любого туннеля. Не нашли —
 	// мерим как есть: лучше неточный пинг, чем никакого.
-	ifaceCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	iface, _ := physicalInterface(ifaceCtx)
-	cancel()
+	iface := a.cachedPhysicalInterface(ctx)
 
 	targets := make([]xray.PingTarget, 0, len(nodes))
 	var listeners []net.Listener
@@ -153,14 +151,40 @@ func (a *App) realPing(ctx context.Context, nodes []model.Node, settings model.S
 	return results, rest, nil
 }
 
-// delayThroughSOCKS — время ответа адреса проверки через локальный SOCKS,
-// мс; -1 — ответа нет. В цифру входит соединение с сервером, рукопожатие и
-// сам запрос: столько же займёт открытие сайта через этот сервер.
+// delayThroughSOCKS — задержка через сервер, мс; -1 — ответа нет.
+//
+// Первый запрос — прогрев: в него входят соединение с сервером, рукопожатия
+// Reality/TLS и DNS, и он в 4–5 раз длиннее настоящей задержки (360 мс против
+// 78 мс у NL при проверке 15.11). Цифрой служит лучший из двух следующих
+// запросов по уже открытому соединению — так меряют Happ и v2rayN. Не удались
+// они — остаётся первый: лучше завышенная цифра, чем «нет связи» у живого
+// сервера.
 func delayThroughSOCKS(ctx context.Context, port int, method, testURL string, timeout time.Duration) int {
 	proxyURL, _ := url.Parse(fmt.Sprintf("socks5://127.0.0.1:%d", port))
-	transport := &http.Transport{Proxy: http.ProxyURL(proxyURL), DisableKeepAlives: true}
+	transport := &http.Transport{Proxy: http.ProxyURL(proxyURL), MaxIdleConnsPerHost: 1, IdleConnTimeout: 15 * time.Second}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, Timeout: timeout}
+	cold := requestDelay(ctx, client, method, testURL, timeout)
+	if cold <= 0 {
+		return -1
+	}
+	warmTimeout := timeout
+	if limit := time.Duration(cold)*time.Millisecond + 2*time.Second; limit < warmTimeout {
+		warmTimeout = limit
+	}
+	best := -1
+	for i := 0; i < 2 && ctx.Err() == nil; i++ {
+		if ms := requestDelay(ctx, client, method, testURL, warmTimeout); ms > 0 && (best < 0 || ms < best) {
+			best = ms
+		}
+	}
+	if best > 0 {
+		return best
+	}
+	return cold
+}
+
+func requestDelay(ctx context.Context, client *http.Client, method, testURL string, timeout time.Duration) int {
 	reqCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	request, err := http.NewRequestWithContext(reqCtx, method, testURL, nil)

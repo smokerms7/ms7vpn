@@ -66,10 +66,6 @@
 
   <main class="main">
     <header class="topbar">
-      <div class="greeting">
-        <span class="greet-title" id="greet-title">Добро пожаловать</span>
-        <span class="greet-sub" id="greet-sub">MS7VPN готов к работе</span>
-      </div>
       <div class="topbar-right">
         <span class="status-pill" id="status-pill"><i></i><span id="status-text">Отключено</span></span>
       </div>
@@ -134,6 +130,28 @@
         <span class="chip-ping" id="chip-ping" hidden></span>
         <span class="chip-action">сменить ›</span>
       </button>
+
+      <!-- Две быстрые кнопки, как у Happ: обновить подписку и проверить пинг. -->
+      <div class="home-acts" id="home-acts">
+        <button type="button" class="hact" id="hact-refresh" title="Скачать подписку заново">
+          <span class="hact-ic" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 0 1-14.3 4.9"/><path d="M4 12a8 8 0 0 1 14.3-4.9"/><path d="M18.5 3.5v3.8h-3.8"/><path d="M5.5 20.5v-3.8h3.8"/></svg>
+          </span>
+          <span class="hact-txt">
+            <b class="hact-t" id="hact-refresh-t">Обновить</b>
+            <small class="hact-s" id="hact-refresh-s">подписку</small>
+          </span>
+        </button>
+        <button type="button" class="hact" id="hact-ping" title="Проверить пинг всех серверов">
+          <span class="hact-ic" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M13 2.5 5 13.5h6l-1 8 8-11h-6z"/></svg>
+          </span>
+          <span class="hact-txt">
+            <b class="hact-t" id="hact-ping-t">Пинг</b>
+            <small class="hact-s" id="hact-ping-s">проверить серверы</small>
+          </span>
+        </button>
+      </div>
 
       <div class="stats4 three speed-row" id="speed-row">
         <div class="st4"><span class="st4-n is-ping" id="stat-ping">—</span><span class="st4-l">Пинг</span></div>
