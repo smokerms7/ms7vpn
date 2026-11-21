@@ -3,7 +3,7 @@ package model
 import "time"
 
 // AppVersion — var, а не const: сборка для Android подставляет свою версию через -ldflags -X.
-var AppVersion = "ms7.vs2.8"
+var AppVersion = "ms7.vs2.9"
 
 type UserInfo struct {
 	UploadBytes   int64 `json:"uploadBytes,omitempty"`

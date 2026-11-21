@@ -24,7 +24,7 @@ import (
 
 const (
 	AppName     = "MS7VPN"
-	AppVersion  = "ms7.vs2.8"
+	AppVersion  = "ms7.vs2.9"
 	Publisher   = "MS7 VPN"
 	RegistryKey = `Software\Microsoft\Windows\CurrentVersion\Uninstall\MS7VPN`
 )
