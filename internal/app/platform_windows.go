@@ -170,6 +170,11 @@ func RestoreSystemProxy(dataDir string) error {
 		{"ProxyOverride", backup.ProxyOverride},
 		{"AutoConfigURL", backup.AutoConfigURL},
 	}
+	// Сохранённый прокси мог принадлежать VPN, который мы остановили при
+	// подключении: возвращать его — оставить систему без интернета.
+	if backup.ProxyEnable.Exists && backup.ProxyEnable.Value != "0" && deadLoopbackProxy(backup.ProxyServer.Value) {
+		values[0].value = registryValue{Exists: true, Type: "REG_DWORD", Value: "0"}
+	}
 	var firstErr error
 	for _, item := range values {
 		if item.value.Exists {

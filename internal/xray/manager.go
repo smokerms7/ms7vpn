@@ -481,7 +481,11 @@ func downloadVerified(ctx context.Context, sourceURL, destination, expectedSHA s
 		return err
 	}
 	request.Header.Set("User-Agent", "MS7VPN core-downloader")
-	client := &http.Client{Timeout: 8 * time.Minute}
+	// Без прокси из переменных окружения: оставшийся HTTP_PROXY на
+	// выключенный локальный порт ломал скачивание ядра.
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	client := &http.Client{Transport: transport, Timeout: 8 * time.Minute}
 	response, err := client.Do(request)
 	if err != nil {
 		return fmt.Errorf("скачивание: %w", err)

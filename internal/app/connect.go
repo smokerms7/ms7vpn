@@ -273,10 +273,15 @@ func (a *App) Connect(parent context.Context, nodeID, mode string) (model.AppSta
 		if err := ctx.Err(); err != nil {
 			return fail(err)
 		}
-		if err := EnableSystemProxy(a.dataDir, httpPort, socksPort); err != nil {
-			return fail(err)
+		// В TUN через туннель и так идёт всё. Системный прокси и переменные
+		// для консоли там лишние и опасны: если программу убьют, они
+		// остаются указывать на мёртвый порт, и интернет пропадает.
+		if mode == "system-proxy" {
+			if err := EnableSystemProxy(a.dataDir, httpPort, socksPort); err != nil {
+				return fail(err)
+			}
 		}
-		if settings.ConsoleProxy {
+		if settings.ConsoleProxy && mode == "system-proxy" {
 			if err := EnableConsoleProxy(a.dataDir, httpPort); err != nil {
 				a.logf("не удалось задать прокси для консольных программ: %v", err)
 			} else {

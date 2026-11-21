@@ -137,7 +137,7 @@ func (a *App) startNativeTun(ctx context.Context, p nativeTunParams) ([]string, 
 			DirectApps: p.settings.DirectApps,
 		})
 	}
-	adapter := xray.TunAdapterName
+	adapter := a.preferredTunName()
 	built, err := build(adapter)
 	if err != nil {
 		return nil, err
@@ -162,7 +162,7 @@ func (a *App) startNativeTun(ctx context.Context, p nativeTunParams) ([]string, 
 		// секундами), последний — снова основное.
 		if attempt < len(xray.TunAdapterNames) && transientTunStart(startErr) {
 			tunnet.WaitAdapterGone(adapter, 1500*time.Millisecond)
-			if next := xray.TunAdapterNames[(attempt+1)%len(xray.TunAdapterNames)]; next != adapter {
+			if next := nextTunName(adapter); next != adapter {
 				adapter = next
 				var buildErr error
 				if built, buildErr = build(adapter); buildErr != nil {
@@ -175,6 +175,7 @@ func (a *App) startNativeTun(ctx context.Context, p nativeTunParams) ([]string, 
 		}
 		return nil, startErr
 	}
+	a.rememberTunName(adapter)
 	a.logf("ядро Xray с TUN запущено (+%d мс)", time.Since(t0).Milliseconds())
 
 	// Прогрев: канал до сервера через локальный HTTP-вход. Короткие попытки
@@ -251,4 +252,38 @@ func firstLine(text string) string {
 		return text[:i]
 	}
 	return text
+}
+
+// Имя адаптера, с которым TUN поднялся в прошлый раз. Основное имя на ПК
+// бывает «отравлено» до переустановки драйвера: каждое подключение ждало
+// 2,5 с на нём и только потом брало запасное. Теперь начинаем с рабочего.
+func tunNamePath(dataDir string) string { return filepath.Join(dataDir, "tun-adapter.txt") }
+
+func (a *App) preferredTunName() string {
+	data, err := os.ReadFile(tunNamePath(a.dataDir))
+	if err == nil {
+		name := strings.TrimSpace(string(data))
+		for _, known := range xray.TunAdapterNames {
+			if name == known {
+				return name
+			}
+		}
+	}
+	return xray.TunAdapterName
+}
+
+func (a *App) rememberTunName(name string) {
+	if a.preferredTunName() != name {
+		_ = os.WriteFile(tunNamePath(a.dataDir), []byte(name), 0o600)
+	}
+}
+
+func nextTunName(current string) string {
+	names := xray.TunAdapterNames
+	for i, name := range names {
+		if name == current {
+			return names[(i+1)%len(names)]
+		}
+	}
+	return names[0]
 }

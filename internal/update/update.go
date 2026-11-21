@@ -206,8 +206,21 @@ func fetchManifest(ctx context.Context, source, currentVersion string) (Manifest
 		request.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	}
 
-	client := &http.Client{Timeout: 15 * time.Second}
-	response, err := client.Do(request)
+	// Сразу после подключения VPN DNS и маршруты ещё переключаются, и первый
+	// запрос иногда падает («no data of the requested type»). Сетевые ошибки
+	// повторяем; ответ сервера с кодом ошибки — нет.
+	client := directClient(8 * time.Second)
+	var response *http.Response
+	for attempt := 0; ; attempt++ {
+		response, err = client.Do(request.Clone(ctx))
+		if err == nil || attempt >= 2 || ctx.Err() != nil {
+			break
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(time.Duration(1500*(attempt+1)) * time.Millisecond):
+		}
+	}
 	if err != nil {
 		return Manifest{}, fmt.Errorf("сервер обновлений недоступен: %w", err)
 	}
@@ -272,7 +285,7 @@ func Download(ctx context.Context, url, expectedSHA256, namePattern string, prog
 
 	// Таймаут на всё скачивание не ставим: на медленном канале двадцать
 	// мегабайт легко идут дольше любого разумного срока. Отмену даёт ctx.
-	client := &http.Client{}
+	client := directClient(0)
 	response, err := client.Do(request)
 	if err != nil {
 		return "", fmt.Errorf("не удалось скачать: %w", err)
@@ -384,7 +397,7 @@ func FetchSHA256(ctx context.Context, url string) (string, error) {
 		return "", err
 	}
 	request.Header.Set("User-Agent", "MS7VPN downloader")
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := directClient(30 * time.Second)
 	response, err := client.Do(request)
 	if err != nil {
 		return "", err
@@ -569,4 +582,15 @@ func TempName(url string) string {
 		extension = ".tmp"
 	}
 	return "ms7vpn-*" + extension
+}
+
+// directClient — HTTP-клиент без прокси из переменных окружения. Программа
+// сама ставит HTTP_PROXY для консольных программ, и если переменные остались
+// от прошлого сеанса (или их задал другой VPN), запросы уходили в выключенный
+// локальный прокси: «actively refused». Трафик и так идёт через туннель или
+// напрямую — посредник не нужен.
+func directClient(timeout time.Duration) *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	return &http.Client{Transport: transport, Timeout: timeout}
 }

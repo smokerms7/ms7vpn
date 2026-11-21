@@ -39,7 +39,8 @@ type FetchResult struct {
 func NewFetcher(dataDir string) *Fetcher {
 	return &Fetcher{
 		Client: &http.Client{
-			Timeout: 35 * time.Second,
+			Transport: noEnvProxyTransport(),
+			Timeout:   35 * time.Second,
 			CheckRedirect: func(_ *http.Request, via []*http.Request) error {
 				if len(via) >= 5 {
 					return fmt.Errorf("слишком много перенаправлений")
@@ -275,4 +276,12 @@ func parseUpdateInterval(value string) int {
 		return minutes
 	}
 	return 0
+}
+
+// noEnvProxyTransport — без HTTP_PROXY из окружения: оставшаяся от прошлого
+// сеанса переменная на выключенный локальный порт ломала обновление подписок.
+func noEnvProxyTransport() *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	return transport
 }

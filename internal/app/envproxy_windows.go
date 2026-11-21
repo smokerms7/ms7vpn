@@ -57,7 +57,7 @@ func EnableConsoleProxy(dataDir string, httpPort int) error {
 	for name, value := range map[string]string{
 		"HTTP_PROXY":  proxy,
 		"HTTPS_PROXY": proxy,
-		"NO_PROXY":    "localhost,127.0.0.1,::1",
+		"NO_PROXY":    ourNoProxy,
 	} {
 		if err := key.SetStringValue(name, value); err != nil {
 			return err
@@ -72,6 +72,7 @@ func EnableConsoleProxy(dataDir string, httpPort int) error {
 func RestoreConsoleProxy(dataDir string) error {
 	data, err := os.ReadFile(envBackupPath(dataDir))
 	if err != nil {
+		cleanStaleConsoleProxy()
 		return nil
 	}
 	var backup envBackup
@@ -85,7 +86,9 @@ func RestoreConsoleProxy(dataDir string) error {
 	}
 	defer key.Close()
 	for _, name := range envProxyNames {
-		if backup.Present[name] {
+		// Значение на мёртвый локальный порт — хвост прошлого сеанса или
+		// остановленного VPN, а не настройка пользователя: не возвращаем.
+		if backup.Present[name] && !(name != "NO_PROXY" && deadLoopbackProxy(backup.Values[name])) {
 			_ = key.SetStringValue(name, backup.Values[name])
 		} else {
 			_ = key.DeleteValue(name)
@@ -93,6 +96,33 @@ func RestoreConsoleProxy(dataDir string) error {
 	}
 	broadcastEnvironmentChange()
 	return os.Remove(envBackupPath(dataDir))
+}
+
+// ourNoProxy — значение NO_PROXY, которое ставит только эта программа.
+const ourNoProxy = "localhost,127.0.0.1,::1"
+
+// cleanStaleConsoleProxy убирает наши переменные, если резервной копии нет,
+// а они остались (программу убили, или копия была снята с уже наших
+// значений). Узнаём их по точному NO_PROXY и прокси на мёртвый локальный
+// порт — иначе git, npm, curl и проверка обновлений стучатся в пустоту.
+func cleanStaleConsoleProxy() {
+	key, err := registry.OpenKey(registry.CURRENT_USER, "Environment", registry.QUERY_VALUE|registry.SET_VALUE)
+	if err != nil {
+		return
+	}
+	defer key.Close()
+	noProxy, _, err := key.GetStringValue("NO_PROXY")
+	if err != nil || noProxy != ourNoProxy {
+		return
+	}
+	httpProxy, _, _ := key.GetStringValue("HTTP_PROXY")
+	if !deadLoopbackProxy(httpProxy) {
+		return
+	}
+	for _, name := range []string{"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"} {
+		_ = key.DeleteValue(name)
+	}
+	broadcastEnvironmentChange()
 }
 
 // broadcastEnvironmentChange сообщает Проводнику и открытым программам, что
